@@ -35,6 +35,12 @@ class PumpHandle:
         self.online = worker.online
         self.offline = worker.offline
 
+    def start(self) -> None:
+        """Start wątku roboczego. Wołaj PO podpięciu wszystkich slotów:
+        _identify emituje version/online JEDNORAZOWO, natychmiast po
+        starcie — wcześniejszy start = sygnały w próżnię."""
+        self._thread.start()
+
     def submit(self, op: Op, **kw) -> bool:
         """Wrzuć operację. False = worker już zamknięty."""
         try:
@@ -43,16 +49,16 @@ class PumpHandle:
         except Exception:
             return False
 
+    def validate_rate(self, value: float, unit: str) -> str | None:
+        """Delegacja do drivera (GUI/UX). Czyta wyłącznie cache drivera
+        (bez I/O) — bezpieczne z GUI-wątku pod GIL."""
+        return self._worker.driver.validate_rate(value, unit)
+
     def close(self) -> None:
         """Czysty shutdown — wywoływać TYLKO z GUI-wątku (Session)."""
         self._worker._queue.put((None, {}))          # wyjście z pętli
         self._thread.quit()
         self._thread.wait(2000)
-
-    def validate_rate(self, value: float, unit: str) -> str | None:
-        """Delegacja do drivera (GUI/UX). Czyta wyłącznie cache drivera
-        (bez I/O) — bezpieczne z GUI-wątku pod GIL."""
-        return self._worker.driver.validate_rate(value, unit)
 
 
 class PumpWorker(QObject):
@@ -177,10 +183,14 @@ def make_pump(port: str | None, model_key: str,
               poll_period: float = 0.5) -> PumpHandle:
     """Fabryka: (port | None, model) -> handle. Wołana z GUI-wątku.
 
+    Zwraca handle z wątkiem NIEURUCHOMIONYM — wołający podpina sloty,
+    a potem woła handle.start(). Inaczej jednorazowe emity version/
+    online z _identify trafiają w próżnię.
+
     Reguły fail-fast (zanim cokolwiek wystartuje):
-      - model realny bez portu          -> RuntimeError
-      - demo z portem                   -> RuntimeError (demo nie ma portu)
-      - model realny bez TRANSPORT_CONF -> RuntimeError
+      - model realny bez portu           -> RuntimeError
+      - demo z portem                    -> RuntimeError (demo nie ma portu)
+      - model realny bez TRANSPORT_CONF  -> RuntimeError
     """
     from core.pump.registry import REGISTRY
     from core.transport.serial_port import SerialTransport
@@ -205,7 +215,7 @@ def make_pump(port: str | None, model_key: str,
     thread = QThread()
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
-    thread.start()
+    # UWAGA: wątek startuje WOŁAJĄCY (po zasubskrybowaniu) — patrz wyżej
     return PumpHandle(worker, thread)
 
 
