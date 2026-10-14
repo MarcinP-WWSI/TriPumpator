@@ -2,23 +2,8 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="9ae845d8-6abc-44e4-9f48-b28b3bb87547" name="Changes" comment="Initial commit">
-      <change afterPath="$PROJECT_DIR$/core/device.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/port_scanner.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/pump/base.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/pump/demo.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/pump/models/al1000.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/pump/registry.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/pump/worker.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/session.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/transport/mock.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/transport/protocol_al1000.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/transport/serial.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ui/device_window.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ui/main_panel.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ui/selector_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -51,22 +36,22 @@
     <option name="sortByType" value="true" />
     <option name="sortKey" value="BY_TYPE" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
-    "git-widget-placeholder": "main",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.stylelint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.stylelint": "",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.stylelint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.stylelint&quot;: &quot;&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\kompu\PycharmProjects\TriPumpator\core\pump\models" />

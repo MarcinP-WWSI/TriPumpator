@@ -1,8 +1,12 @@
 [project]
 name = "tripumpator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Kontroler 3 pomp strzykawkowych (multi-model) przez USB->RS-232"
 requires-python = ">=3.12"
 dependencies = [
     "pyqt6==6.11.0",
+    "pyserial>=3.5",
 ]
+
+[project.scripts]
+tripumpator = "main:main"
