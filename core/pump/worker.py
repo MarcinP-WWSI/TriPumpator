@@ -172,17 +172,30 @@ def make_pump(port: str | None, model_key: str,
               poll_period: float = 0.5) -> PumpHandle:
     """Fabryka: (port | None, model) -> handle. Wołana z GUI-wątku.
 
-    port=None + model demo -> symulator bez transportu.
-    port=None + inny model -> RuntimeError (realna pompa wymaga portu).
+    Reguły fail-fast (zanim cokolwiek wystartuje):
+      - model realny bez portu          -> RuntimeError
+      - demo z portem                   -> RuntimeError (demo nie ma portu)
+      - model realny bez TRANSPORT_CONF -> RuntimeError
     """
     from core.pump.registry import REGISTRY
     from core.transport.serial_port import SerialTransport
 
     driver_cls = REGISTRY[model_key]
-    if port is None and driver_cls is not DemoDriver:
-        raise RuntimeError(f"{model_key}: model wymaga portu COM")
 
-    transport = None if port is None else SerialTransport(port)
+    if driver_cls is DemoDriver:
+        if port is not None:
+            raise RuntimeError("Pompa demo nie używa portu COM")
+        transport = None
+    else:
+        if port is None:
+            raise RuntimeError(f"{model_key}: model wymaga portu COM")
+        conf = driver_cls.TRANSPORT_CONF
+        if not conf:
+            raise RuntimeError(
+                f"{model_key}: brak TRANSPORT_CONF — zdefiniuj parametry "
+                f"transportu (baudrate, terminator, ...) w driverze modelu")
+        transport = SerialTransport(port, **conf)
+
     worker = PumpWorker(driver_cls(transport), poll_period=poll_period)
     thread = QThread()
     worker.moveToThread(thread)

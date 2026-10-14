@@ -56,6 +56,13 @@ class AL1000Driver(BasePumpDriver):
     )
 
     ADDR = 0  # jedna pompa na port — adres sieciowy bez znaczenia
+    TRANSPORT_CONF = {
+        "baudrate": 19200,
+        "bytesize": 8,  # serial.EIGHTBITS
+        "parity": "N",  # serial.PARITY_NONE
+        "stopbits": 1,  # serial.STOPBITS_ONE
+        "terminator": b"\x03",
+    }
 
     def __init__(self, transport):
         super().__init__(transport)

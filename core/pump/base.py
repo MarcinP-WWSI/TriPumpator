@@ -85,6 +85,7 @@ class BasePumpDriver(ABC):
     (blokujące I/O). Metody mogą rzucać — worker łapie i raportuje.
     """
     capabilities = PumpCapabilities()
+    TRANSPORT_CONF: dict | None = None
 
     def __init__(self, transport):
         self.transport = transport

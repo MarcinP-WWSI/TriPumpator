@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="9ae845d8-6abc-44e4-9f48-b28b3bb87547" name="Changes" comment="Initial commit">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/pump/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/pump/base.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/pump/models/al1000.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/pump/models/al1000.py" afterDir="false" />
     </list>
@@ -42,6 +43,7 @@
     "Python.al1000.executor": "Run",
     "Python.protocol_al1000.executor": "Run",
     "Python.serial.executor": "Run",
+    "Python.worker.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
@@ -114,9 +116,11 @@
     <option name="LAST_COMMIT_MESSAGE" value="Initial commit" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/TriPumpator$al1000.coverage" NAME="al1000 Coverage Results" MODIFIED="1791979109874" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/pump/models" />
+    <SUITE FILE_PATH="coverage/TriPumpator$al1000.coverage" NAME="al1000 Coverage Results" MODIFIED="1791979411716" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/pump/models" />
     <SUITE FILE_PATH="coverage/TriPumpator$protocol_al1000.coverage" NAME="protocol_al1000 Coverage Results" MODIFIED="1791976775294" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/transport" />
     <SUITE FILE_PATH="coverage/TriPumpator$serial.coverage" NAME="serial Coverage Results" MODIFIED="1791977034696" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/transport" />
+    <SUITE FILE_PATH="coverage/TriPumpator$demo.coverage" NAME="demo Coverage Results" MODIFIED="1791979561944" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/pump" />
+    <SUITE FILE_PATH="coverage/TriPumpator$worker.coverage" NAME="worker Coverage Results" MODIFIED="1791980226846" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/pump" />
     <SUITE FILE_PATH="coverage/TriPumpator$serial_port.coverage" NAME="serial_port Coverage Results" MODIFIED="1791977444337" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/transport" />
     <SUITE FILE_PATH="coverage/TriPumpator$base.coverage" NAME="base Coverage Results" MODIFIED="1791977939495" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/core/pump" />
   </component>
