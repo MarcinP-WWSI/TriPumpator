@@ -49,6 +49,11 @@ class PumpHandle:
         self._thread.quit()
         self._thread.wait(2000)
 
+    def validate_rate(self, value: float, unit: str) -> str | None:
+        """Delegacja do drivera (GUI/UX). Czyta wyłącznie cache drivera
+        (bez I/O) — bezpieczne z GUI-wątku pod GIL."""
+        return self._worker.driver.validate_rate(value, unit)
+
 
 class PumpWorker(QObject):
     # statusy i wyniki komend (GUI rysuje z tego)
