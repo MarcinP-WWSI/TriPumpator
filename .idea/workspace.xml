@@ -2,13 +2,35 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="9ae845d8-6abc-44e4-9f48-b28b3bb87547" name="Changes" comment="Initial commit">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/device.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/port_scanner.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/pump/base.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/pump/demo.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/pump/models/al1000.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/pump/registry.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/pump/worker.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/session.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/transport/mock.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/transport/protocol_al1000.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/transport/serial.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ui/device_window.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ui/main_panel.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ui/selector_window.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -45,6 +67,13 @@
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\kompu\PycharmProjects\TriPumpator\core\pump\models" />
+      <recent name="C:\Users\kompu\PycharmProjects\TriPumpator\core" />
+      <recent name="C:\Users\kompu\PycharmProjects\TriPumpator\pumps\al1000" />
+    </key>
+  </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -70,7 +99,23 @@
       <option name="project" value="LOCAL" />
       <updated>1791970496073</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Initial commit">
+      <option name="closed" value="true" />
+      <created>1791971593522</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1791971593522</updated>
+    </task>
+    <task id="LOCAL-00003" summary="Initial commit">
+      <option name="closed" value="true" />
+      <created>1791971606444</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1791971606444</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
