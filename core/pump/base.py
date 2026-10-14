@@ -26,6 +26,9 @@ VOLUME_UNITS = ("µL", "mL")
 def norm_unit(unit: str) -> str:
     return unit.translate(_UNIT_FIX).strip()
 
+class PumpCommandError(Exception):
+    """Pompa odrzuciła komendę (błąd ?NA/?OOR/?COM albo wartość
+    niesformatowalna w protokole modelu)."""
 
 class Op(Enum):
     """Wspólny zestaw operacji. GUI emituje WYŁĄCZNIE te operacje."""
