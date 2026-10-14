@@ -46,7 +46,7 @@ class PumpWorker(QObject):
 
 def make_pump(port: str, model_key: str, parent=None) -> PumpHandle:
     """Fabryka: port + model -> wątek + driver + handle. Wywoływane z Session."""
-    from core.transport.serial import SerialTransport
+    from core.transport.serial_port import SerialTransport
     from core.pump.registry import REGISTRY
 
     transport = SerialTransport(port)          # lub MockTransport w trybie demo
