@@ -68,7 +68,11 @@ class Session(QObject):
             raise RuntimeError("sesja już wystartowana")
 
         for pid, (port, model_key) in enumerate(config, start=1):
-            handle = self._factory(port, model_key)
+            try:
+                handle = self._factory(port, model_key)
+            except Exception:
+                self.shutdown_all()  # posprzątaj pompy już utworzone
+                raise
 
             # subskrypcja PRZED startem wątku: _identify emituje
             # version/online jednorazowo, natychmiast po starcie
@@ -133,6 +137,12 @@ class Session(QObject):
             return                     # już usunięta (guard rekurencji)
         win = self._windows.pop(pid)
         win.detach()
+        try:
+            win.closed.disconnect()    # Session zamyka okno sama: bez echa
+        except TypeError:
+            pass
+        win.close()                    # no-op, gdy zamknięcie zainicjował
+                                       # użytkownik (okno i tak znika)
         handle = self._pumps.pop(pid)
         self._relays.pop(pid, None)
         handle.close()                 # sentinel + quit + wait(2000)
