@@ -1,16 +1,8 @@
 {
   "rows": [
     [
-      null,
-      "Pompa demo (symulator)"
-    ],
-    [
-      null,
-      "Pompa demo (symulator)"
-    ],
-    [
-      null,
-      "Pompa demo (symulator)"
+      "COM7",
+      "Harvard Pump 11 Elite"
     ]
   ]
 }

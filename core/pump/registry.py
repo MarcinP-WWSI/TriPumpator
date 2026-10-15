@@ -10,12 +10,12 @@ from __future__ import annotations
 from core.pump.base import BasePumpDriver
 from core.pump.demo import DemoDriver
 from core.pump.models.al1000 import AL1000Driver
+from core.pump.models.p11elite import P11EliteDriver
 
 REGISTRY: dict[str, type[BasePumpDriver]] = {
     "WPI AL-1000": AL1000Driver,
+    "Harvard Pump 11 Elite": P11EliteDriver,
     "Pompa demo (symulator)": DemoDriver,
-    # "Model B": BDriver,   <- gdy poznasz protokół
-    # "Model C": CDriver,
 }
 
 
@@ -35,6 +35,8 @@ if __name__ == "__main__":
 
     # conf transportu: AL-1000 pełny (fabryczne 19200/8N1/ETX), demo brak
     conf = AL1000Driver.TRANSPORT_CONF
+    conf11 = P11EliteDriver.TRANSPORT_CONF
+    assert conf11 and conf11["terminator"] == b"\r"
     assert conf and conf["baudrate"] == 19200
     assert conf["terminator"] == b"\x03"
     assert DemoDriver.TRANSPORT_CONF is None        # dziedziczy None z base

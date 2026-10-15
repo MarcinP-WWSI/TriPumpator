@@ -49,23 +49,32 @@ class SerialTransport:
 
     # ---------------------------------------------------------------- API
 
-    def request(self, frame: bytes, terminator: bytes | None = None) \
-            -> bytes | None:
-        """Wyślij ramkę, zbierz odpowiedź do terminatora (włącznie).
+    def request(self, frame: bytes, terminator: bytes | None = None,
+                until=None) -> bytes | None:
+        """Wyślij ramkę, zbierz odpowiedź.
 
-        None = cisza w ramach timeoutu (pompa zajęta / zły adres / brak
-        pompy na magistrali). TransportError = port nieżywy.
+        Dwa tryby (wybiera driver modelu):
+          terminator (domyślny z konstruktora): odpowiedź domknięta
+            sekwencją bajtów — ramka ramkowa (AL-1000: ETX).
+          until: callable(data: bytes) -> bool — czytanie do spełnienia
+            warunku na całym buforze (Pump 11: ostatnia linia = prompt).
+            until ma priorytet nad terminatorem.
+
+        None = cisza w ramach timeoutu (pompa zajęta / zły tryb).
+        TransportError = port nieżywy (USB wypięty).
         """
         term = terminator or self.terminator
         deadline = time.monotonic() + self._timeout
-
         try:
-            # stare śmiecie z poprzedniej, niedokończonej wymiany — w kosz
             self._ser.reset_input_buffer()
             self._ser.write(frame)
-
             buf = bytearray()
-            while term not in buf:
+            while True:
+                if until is not None:
+                    if until(bytes(buf)):
+                        return bytes(buf)
+                elif term in buf:
+                    return bytes(buf[: buf.index(term) + len(term)])
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
@@ -74,11 +83,8 @@ class SerialTransport:
                 if not chunk:
                     return None
                 buf += chunk
-            return bytes(buf[: buf.index(term) + len(term)])
-
         except serial.SerialException as e:
-            raise TransportError(
-                f"port {self.port} nieaktywny: {e}") from e
+            raise TransportError(f"port {self.port} nieaktywny: {e}") from e
 
     def reopen(self) -> None:
         """Spróbuj wskrzesić port (po wypięciu/wpięciu USB)."""
