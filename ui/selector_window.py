@@ -28,6 +28,45 @@ from core.pump.demo import DemoDriver
 from core.pump.registry import REGISTRY
 from core.port_scanner import PortInfo, scan_ports
 
+import json
+from pathlib import Path
+
+# Magazyn ustawień: zwykły plik JSON obok projektu — czytelny,
+# przenośny, usuwa się razem z aplikacją. Konstruktor przyjmuje
+# ścieżkę (testy: plik tymczasowy); domyślnie tripumpator.json
+# w katalogu głównym projektu.
+SETTINGS_PATH = Path(__file__).resolve().parent.parent / "tripumpator.json"
+
+
+class JsonSettings:
+    """API zgodne z QSettings (value/setValue), backend: plik JSON.
+
+    Zapis atomowy (tmp + replace) — przerwanie zapisu nie niszczy
+    poprzedniego pliku. Porażka I/O (np. dysk read-only) jest cicha:
+    ustawienia to wygoda, nie krytyczny stan aplikacji.
+    """
+
+    def __init__(self, path: Path | str = SETTINGS_PATH):
+        self._path = Path(path)
+        self._d: dict = {}
+        try:
+            self._d = json.loads(self._path.read_text("utf-8"))
+        except (OSError, ValueError):
+            pass                       # brak pliku / uszkodzony -> start od zera
+
+    def value(self, key, default=None):
+        return self._d.get(key, default)
+
+    def setValue(self, key, value):
+        self._d[key] = value
+        try:
+            tmp = self._path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._d, ensure_ascii=False,
+                                      indent=2), "utf-8")
+            tmp.replace(self._path)          # atomowy commit
+        except OSError:
+            pass
+
 _PLACEHOLDER = "— brak portu (demo) —"
 
 
@@ -71,8 +110,10 @@ class SelectorWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("TriPumpator — konfiguracja stanowiska")
         self._scan_source = scan_source
-        self._settings = settings if settings is not None \
-            else QSettings("WWSI", "TriPumpator")
+        if settings is not None:  # jawny seam (testy)
+            self._settings = settings
+        else:
+            self._settings = JsonSettings()  # tripumpator.json
         self._error = error_reporter or self._default_error
         self._ports: list[PortInfo] = []
         self.rows: list[_Row] = []
@@ -293,5 +334,41 @@ if __name__ == "__main__":
     s5.refresh_ports()
     assert s5.rows[0].port_cb.count() == 4    # placeholder + 3 porty
     assert s5.rows[0].port_cb.currentData() == "COM3"
+
+    # 10. persystencja JSON: zapis przy udanym starcie, odczyt po
+    #     restarcie; plik w localhost tmp, nie w projekcie
+    import tempfile
+    from pathlib import Path
+    from ui.selector_window import JsonSettings
+
+    with tempfile.TemporaryDirectory() as td:
+        jpath = Path(td) / "settings.json"
+        js = JsonSettings(jpath)
+        js.setValue("rows", [["COM3", AL]])
+        assert JsonSettings(jpath).value("rows") == [["COM3", AL]]
+
+        # porażka I/O cicha: ścieżka nieistniejąca/niezapisywalna
+        bad = JsonSettings(Path(td) / "no-dir" / "x.json")
+        bad.setValue("k", 1)  # nie ma prawa wybuchnąć
+        assert bad.value("k") == 1  # działa na kopii w RAM
+
+        # uszkodzony plik -> start od zera, bez wyjątku
+        (Path(td) / "broken.json").write_text("{nie-json", "utf-8")
+        assert JsonSettings(Path(td) / "broken.json").value("x") is None
+
+        # pełny scenariusz przez selector: start sesji zapisuje plik,
+        # nowa instancja go odczytuje
+        got.clear()
+        s6 = SelectorWindow(scan_source=src, settings=JsonSettings(jpath),
+                            error_reporter=errs.append)
+        s6.session_requested.connect(got.append)
+        s6.rows[0].port_cb.setCurrentIndex(1)  # AL na COM3
+        s6._emit()
+        assert got == [[("COM3", AL)]]
+        s7 = SelectorWindow(scan_source=src, settings=JsonSettings(jpath),
+                            error_reporter=lambda m: None)
+        assert len(s7.rows) == 1
+        assert s7.rows[0].port_cb.currentData() == "COM3"
+        assert s7.rows[0].model_cb.currentText() == AL
 
     print("selector_window: OK")
