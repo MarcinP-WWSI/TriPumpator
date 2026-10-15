@@ -22,6 +22,28 @@ _UNIT_FIX = str.maketrans({"μ": "µ"})
 RATE_UNITS = ("µL/min", "mL/min", "µL/h", "mL/h")
 VOLUME_UNITS = ("µL", "mL")
 
+def to_ml(value: float, unit: str | None) -> float:
+    """Objętość w 'mL'/'µL' -> mililitry."""
+    if unit is None:
+        return value
+    return value / 1000.0 if norm_unit(unit) == "µL" else value
+
+
+def fmt_volume_ml(ml: float) -> str:
+    """Auto-skalowana objętość: >= 0.1 mL -> mL, poniżej -> µL.
+
+    Przy rate'ach rzędu µL/min licznik w mL długo stoi na 0.000 —
+    jednostka dostosowuje się do wielkości, nie do średnicy pompy.
+    """
+    if abs(ml) >= 0.1:
+        return f"{ml:.3f} mL"
+    return f"{ml * 1000.0:.3f} µL"
+
+
+def fmt_dispensed(value: float, unit: str | None) -> str:
+    """Formatuj 'Dozowane' niezależnie od jednostek raportowanych przez
+    pompę (AL-1000 raportuje mL albo µL zależnie od średnicy strzykawki)."""
+    return fmt_volume_ml(to_ml(value, unit))
 
 def norm_unit(unit: str) -> str:
     return unit.translate(_UNIT_FIX).strip()
@@ -49,6 +71,9 @@ class PumpStatus:
     direction: str | None = None      # "INF" / "WDR"
     rate: float | None = None
     rate_unit: str | None = None      # znormalizowana (norm_unit)
+    target_volume: float | None = None       # wartość ustawiona na pompie
+    target_volume_unit: str | None = None    # jednostki objętości pompy
+    diameter: float | None = None      # mm, ostatnio ustawiona
     dispensed: float | None = None
     dispensed_unit: str | None = None # "mL" / "µL" — co raportuje pompa
     alarm: str | None = None          # kod alarmu modelu, nie tekst
@@ -184,5 +209,15 @@ if __name__ == "__main__":
     # model znający mL/h i mL/min — tu działa ścieżka przeliczenia:
     assert d2.validate_rate(2.0, "mL/min") is None       # -> 120 mL/h
     assert d2.validate_rate(20.0, "mL/min") is not None  # -> 1200 mL/h
+
+    # --- formatowanie objętości
+    assert to_ml(500.0, "µL") == 0.5
+    assert to_ml(0.5, "mL") == 0.5 and to_ml(0.5, None) == 0.5
+    assert fmt_volume_ml(1.5) == "1.500 mL"
+    assert fmt_volume_ml(0.1) == "0.100 mL"
+    assert fmt_volume_ml(0.0999) == "99.900 µL"
+    assert fmt_volume_ml(0.0004) == "0.400 µL"
+    assert fmt_dispensed(50.0, "µL") == "50.000 µL"
+    assert fmt_dispensed(1.25, "mL") == "1.250 mL"
 
     print("base: OK")

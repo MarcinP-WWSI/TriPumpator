@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from core.session import Session
@@ -68,7 +69,11 @@ def main() -> None:
 
     app.aboutToQuit.connect(on_about_to_quit)
 
-    open_selector()
+    # KLUCZ: główna pętla startuje PIERWSZA, selector otwierany w niej
+    # dopiero po starcie. quit() wywołany przed exec() jest ignorowany
+    # przez Qt — stąd poprzedni bug: X na selectorze przed startem
+    # sesji zostawiał proces-wisielca (QuitOnLastWindowClosed wyłączone).
+    QTimer.singleShot(0, open_selector)
     sys.exit(app.exec())
 
 

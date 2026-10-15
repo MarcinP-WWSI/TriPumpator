@@ -1,9 +1,9 @@
 """Pompa demo — generyczny symulator do developmentu bez sprzętu.
 
 Odtwarza zachowania wspólne dla realnych pomp (na wzór AL-1000):
-liczniki I/W osobno, auto-stop po zadanym wolumenie, purge
-maksymalną prędkością, zerowanie liczników przy zmianie średnicy,
-jednorazowe alarmy do testów GUI.
+liczniki I/W osobno, auto-stop po zadanym wolumenie (mL lub µL),
+purge maksymalną prędkością, zerowanie liczników przy zmianie
+średnicy, jednorazowe alarmy do testów GUI.
 
 Zegar wstrzykiwalny (clock=...) — testy przesuwają czas ręcznie.
 """
@@ -20,11 +20,11 @@ from core.pump.base import (
 class DemoDriver(BasePumpDriver):
     capabilities = PumpCapabilities(
         name="Pompa demo",
-        rate_units=("mL/h", "mL/min"),
+        rate_units=("mL/h", "mL/min", "µL/h", "µL/min"),
         rate_min=0.01,
         rate_max=500.0,
         directions=("INF", "WDR"),
-        volume_units=("mL",),
+        volume_units=("mL", "µL"),
         target_volume=True,
         dispensed_query=True,
         purge=True,
@@ -38,9 +38,10 @@ class DemoDriver(BasePumpDriver):
         self.rate, self.rate_unit = 100.0, "mL/h"
         self.running, self.purging = False, False
         self.direction = "INF"
-        self.target_volume: float | None = None
+        self.target_volume: float | None = None   # wartość w target_unit
+        self.target_unit = "mL"
         self.diameter: float | None = None
-        self.disp: dict[str, float] = {"INF": 0.0, "WDR": 0.0}
+        self.disp: dict[str, float] = {"INF": 0.0, "WDR": 0.0}   # w mL
         self._pending_alarm: str | None = None
         self._t = clock()
 
@@ -52,32 +53,47 @@ class DemoDriver(BasePumpDriver):
 
     # ------------------------------------------------------------ cykl czasu
 
+    def _rate_ml_per_h(self) -> float:
+        """Rate w mL/h (liczniki trzymamy w mL — wspólny mianownik)."""
+        rate = self.capabilities.rate_max if self.purging else self.rate
+        u = norm_unit(self.rate_unit)
+        if "µL" in u:
+            rate /= 1000.0
+        if u.endswith("/min"):
+            rate *= 60.0
+        return rate
+
+    def _target_ml(self) -> float | None:
+        if self.target_volume is None:
+            return None
+        return self.target_volume / 1000.0 \
+            if self.target_unit == "µL" else self.target_volume
+
     def _tick(self) -> None:
         now = self._clock()
         dt = now - self._t
         self._t = now
         if self.running and dt > 0:
-            rate = self.capabilities.rate_max if self.purging else self.rate
-            if self.rate_unit.endswith("/min"):
-                rate *= 60.0                      # do mL/h
-            self.disp[self.direction] += rate * dt / 3600.0
-            if (self.target_volume is not None
-                    and self.disp[self.direction] >= self.target_volume):
+            self.disp[self.direction] += \
+                self._rate_ml_per_h() * dt / 3600.0
+            if (t := self._target_ml()) is not None \
+                    and self.disp[self.direction] >= t:
                 self.running, self.purging = False, False
 
-    def _status(self, **over) -> PumpStatus:
+    def _status(self) -> PumpStatus:
         st = PumpStatus(
             running=self.running,
             direction=self.direction,
             rate=self.rate,
             rate_unit=norm_unit(self.rate_unit),
+            target_volume=self.target_volume,
+            target_volume_unit=self.target_unit,
+            diameter=self.diameter,
             dispensed=self.disp[self.direction],
             dispensed_unit="mL",
             alarm=self._pending_alarm,
         )
         self._pending_alarm = None
-        for k, v in over.items():
-            setattr(st, k, v)
         return st
 
     # ------------------------------------------------------------- API drivera
@@ -104,7 +120,12 @@ class DemoDriver(BasePumpDriver):
                     raise ValueError(f"kierunek: {kw['direction']}")
                 self.direction = kw["direction"]
             case Op.SET_TARGET_VOLUME:
-                self.target_volume = float(kw["volume"]) or None
+                unit = norm_unit(kw.get("unit", self.target_unit))
+                if unit not in self.capabilities.volume_units:
+                    raise ValueError(f"jednostka objętości: {unit}")
+                v = float(kw["volume"])
+                self.target_volume = v if v > 0 else None  # 0 = ciągła
+                self.target_unit = unit
             case Op.SET_DIAMETER:
                 self.diameter = float(kw["mm"])
                 self.disp = {"INF": 0.0, "WDR": 0.0}   # jak AL-1000
@@ -178,12 +199,12 @@ if __name__ == "__main__":
     st = d.poll()
     assert not st.running and abs(st.dispensed - 10.0) < 1e-6
 
-    # 7. purge: maksymalna prędkość (500 mL/h); STP kończy
+    # 7. purge: maksymalna prędkość (500 mL/h); STOP kończy
     d.execute(Op.CLEAR_DISPENSED)
     d.execute(Op.PURGE)
     clk.advance(1.0)
     assert abs(d.poll().dispensed - 500.0) < 1e-6
-    d.execute(Op.STP if hasattr(Op, "STP") else Op.STOP)
+    d.execute(Op.STOP)
     d.execute(Op.CLEAR_DISPENSED)
     clk.advance(1.0)
     assert d.poll().dispensed == 0.0
@@ -208,5 +229,31 @@ if __name__ == "__main__":
     assert d.validate_rate(700.0, "mL/h") is not None   # > 500
     assert d.validate_rate(2.0, "mL/min") is None       # 120 mL/h
     assert d.validate_rate(1.0, "L/h") is not None      # nieznana
+    assert d.validate_rate(120000.0, "µL/h") is None    # 120 mL/h
+
+    # 12. µL: rate 120000 µL/h = 120 mL/h
+    d.execute(Op.STOP)
+    d.execute(Op.CLEAR_DISPENSED)
+    d.execute(Op.SET_DIRECTION, direction="INF")
+    d.execute(Op.SET_RATE, value=120000, unit="µL/h")
+    d.execute(Op.START)
+    clk.advance(0.5)
+    st = d.poll()
+    assert st.rate == 120000 and st.rate_unit == "µL/h"
+    assert abs(st.dispensed - 60.0) < 1e-6
+
+    # 13. target w µL: 500 µL = 0.5 mL; auto-stop po przeliczeniu
+    d.execute(Op.STOP)
+    d.execute(Op.CLEAR_DISPENSED)
+    d.execute(Op.SET_RATE, value=100, unit="mL/h")
+    d.execute(Op.SET_TARGET_VOLUME, volume=500, unit="µL")
+    st = d.execute(Op.POLL)
+    assert st.target_volume == 500 and st.target_volume_unit == "µL"
+    d.execute(Op.START)
+    clk.advance(0.004)
+    assert d.poll().running                    # 0.4 mL < 0.5 mL
+    clk.advance(0.002)
+    st = d.poll()
+    assert not st.running and st.dispensed >= 0.5
 
     print("demo: OK")

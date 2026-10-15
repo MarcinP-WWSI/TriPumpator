@@ -21,8 +21,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QMainWindow, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QLabel,
 )
-
-from core.pump.base import PumpStatus
+from core.pump.base import PumpStatus, fmt_dispensed
 
 _COLS = ["#", "Model", "Link", "Stan", "Kierunek", "Rate",
          "Dozowane", "Alarm"]
@@ -100,7 +99,7 @@ class MainPanel(QMainWindow):
                        f"{st.rate:.3f} {st.rate_unit}"
                        if st.rate is not None else "—")
         self._set_cell(row, 6,
-                       f"{st.dispensed:.3f} {st.dispensed_unit}"
+                       fmt_dispensed(st.dispensed, st.dispensed_unit)
                        if st.dispensed is not None else "—")
         self._set_cell(row, 7, st.alarm or "")
 
@@ -176,6 +175,12 @@ if __name__ == "__main__":
     m.update_pump(2, PumpStatus(running=False, alarm="S"))
     assert m.table.item(1, 3).text() == "stop"
     assert m.table.item(1, 7).text() == "S"
+
+    # 4b. dozowanie auto-skaluje jednostki (µL przy małych wartościach)
+    m.update_pump(1, PumpStatus(dispensed=50.0, dispensed_unit="µL"))
+    assert m.table.item(0, 6).text() == "50.000 µL"
+    m.update_pump(1, PumpStatus(dispensed=0.0004, dispensed_unit="mL"))
+    assert m.table.item(0, 6).text() == "0.400 µL"
 
     # 5. statusy None -> myślniki
     m.update_pump(1, PumpStatus())
