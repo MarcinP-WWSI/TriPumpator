@@ -12,7 +12,7 @@ dwie stawki (irate/wrate) — driver ustawia obie tą samą wartością.
 
 UWAGA (manual str. 51): komendy parametrów działają z ekranu Quick
 Start pompy; dotknięcie touch screena wstrzymuje sesję do wysłania
-<CR> — kolejna nasza komenda to naprawia (każda ramka ma <CR>).
+<CR> — kolejna nasza komenda to naprawia (każda ramka ma <CR>).-
 """
 
 from __future__ import annotations

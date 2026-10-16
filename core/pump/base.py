@@ -21,6 +21,17 @@ _UNIT_FIX = str.maketrans({"μ": "µ"})
 
 RATE_UNITS = ("µL/min", "mL/min", "µL/h", "mL/h")
 VOLUME_UNITS = ("µL", "mL")
+TIME_UNITS = ("s", "min", "h")
+
+
+def norm_unit(unit: str) -> str:
+    return unit.translate(_UNIT_FIX).strip()
+
+
+class PumpCommandError(Exception):
+    """Pompa odrzuciła komendę (błąd protokołu modelu albo wartość
+    niesformatowalna)."""
+
 
 def to_ml(value: float, unit: str | None) -> float:
     """Objętość w 'mL'/'µL' -> mililitry."""
@@ -30,11 +41,7 @@ def to_ml(value: float, unit: str | None) -> float:
 
 
 def fmt_volume_ml(ml: float) -> str:
-    """Auto-skalowana objętość: >= 0.1 mL -> mL, poniżej -> µL.
-
-    Przy rate'ach rzędu µL/min licznik w mL długo stoi na 0.000 —
-    jednostka dostosowuje się do wielkości, nie do średnicy pompy.
-    """
+    """Auto-skalowana objętość: >= 0.1 mL -> mL, poniżej -> µL."""
     if abs(ml) >= 0.1:
         return f"{ml:.3f} mL"
     return f"{ml * 1000.0:.3f} µL"
@@ -45,12 +52,20 @@ def fmt_dispensed(value: float, unit: str | None) -> str:
     pompę (AL-1000 raportuje mL albo µL zależnie od średnicy strzykawki)."""
     return fmt_volume_ml(to_ml(value, unit))
 
-def norm_unit(unit: str) -> str:
-    return unit.translate(_UNIT_FIX).strip()
 
-class PumpCommandError(Exception):
-    """Pompa odrzuciła komendę (błąd ?NA/?OOR/?COM albo wartość
-    niesformatowalna w protokole modelu)."""
+def time_to_seconds(value: float, unit: str) -> float:
+    """Czas w 's'/'min'/'h' -> sekundy."""
+    return value * {"s": 1.0, "min": 60.0, "h": 3600.0}[norm_unit(unit)]
+
+
+def fmt_duration(seconds: float) -> str:
+    """Sekundy -> '45 s' / '5.0 min' / '2.02 h'."""
+    if seconds >= 3600:
+        return f"{seconds / 3600.0:.2f} h"
+    if seconds >= 60:
+        return f"{seconds / 60.0:.1f} min"
+    return f"{seconds:.0f} s"
+
 
 class Op(Enum):
     """Wspólny zestaw operacji. GUI emituje WYŁĄCZNIE te operacje."""
@@ -59,7 +74,9 @@ class Op(Enum):
     PURGE = auto()
     SET_RATE = auto()            # value: float, unit: str
     SET_DIRECTION = auto()       # direction: "INF" | "WDR"
-    SET_TARGET_VOLUME = auto()   # volume: float
+    SET_TARGET_VOLUME = auto()   # volume: float; 0 = praca ciągła
+    SET_TARGET_TIME = auto()     # seconds: float; 0 = praca ciągła
+    SET_FORCE = auto()           # percent: float (1-100)
     SET_DIAMETER = auto()        # mm: float
     CLEAR_DISPENSED = auto()
     POLL = auto()                # status + objętość
@@ -73,6 +90,8 @@ class PumpStatus:
     rate_unit: str | None = None      # znormalizowana (norm_unit)
     target_volume: float | None = None       # wartość ustawiona na pompie
     target_volume_unit: str | None = None    # jednostki objętości pompy
+    target_time: float | None = None         # sekundy; None = brak
+    force: float | None = None               # procent siły (P11 Elite)
     diameter: float | None = None      # mm, ostatnio ustawiona
     dispensed: float | None = None
     dispensed_unit: str | None = None # "mL" / "µL" — co raportuje pompa
@@ -96,10 +115,12 @@ class PumpCapabilities:
     directions: tuple[str, ...] = ("INF",)
     volume_units: tuple[str, ...] = ("mL",)
     target_volume: bool = False
-    dispensed_query: bool = False
+    target_time: bool = False        # AL-1000: brak w protokole
     purge: bool = False
     diameter_setting: bool = False
-    diameter_range: tuple[float, float] = (0.1, 50.0)  # mm, jak AL-1000
+    diameter_range: tuple[float, float] = (0.1, 50.0)  # mm
+    force_setting: bool = False      # P11 Elite: komenda FORCE
+    force_range: tuple[float, float] = (1.0, 100.0)    # procent
     set_rate_while_running: bool = False
 
 
@@ -110,6 +131,10 @@ class BasePumpDriver(ABC):
     (blokujące I/O). Metody mogą rzucać — worker łapie i raportuje.
     """
     capabilities = PumpCapabilities()
+
+    # Parametry transportu modelu (make_pump buduje z nich SerialTransport):
+    # baudrate, bytesize, parity, stopbits, terminator. None = model nie
+    # używa portu (demo) albo nieskonfigurowany — make_pump rzuca fail-fast.
     TRANSPORT_CONF: dict | None = None
 
     def __init__(self, transport):
@@ -132,19 +157,14 @@ class BasePumpDriver(ABC):
     # ------------------------------------------------- walidacja (nadpisywalna)
 
     def validate_rate(self, value: float, unit: str) -> str | None:
-        """Zwróć komunikat błędu, gdy rate nieakceptowalny; None = OK.
-
-        Domyślnie: statyczny zakres z capabilities (w jednostce bazowej).
-        Modele z limitami zależnymi od konfiguracji (AL-1000: średnica)
-        nadpisują tę metodę.
-        """
+        """Zwróć komunikat błędu, gdy rate nieakceptowalny; None = OK."""
         unit = norm_unit(unit)
         if unit not in self.capabilities.rate_units:
             return f"nieobsługiwana jednostka: {unit}"
         base = self.capabilities.rate_units[0]
         v = self.to_base_unit(value, unit, base)
         if v is None:
-            return None  # nie umiemy przeliczyć — przepuść, pompa rozstrzygnie
+            return None
         if not (self.capabilities.rate_min <= v <= self.capabilities.rate_max):
             return (f"rate {value:g} {unit} poza zakresem "
                     f"{self.capabilities.rate_min:g}–"
@@ -162,55 +182,32 @@ class BasePumpDriver(ABC):
         per_min = unit.endswith("/min")
         tpm = target.endswith("/min")
         if per_min != tpm:
-            if tpm:                    # źródło /h  -> cel /min
+            if tpm:
                 value /= 60.0
-            else:                      # źródło /min -> cel /h
+            else:
                 value *= 60.0
         u = "µL" if "µL" in unit else "mL"
         t = "µL" if "µL" in target else "mL"
         if u != t:
-            if t == "µL":              # mL -> µL
+            if t == "µL":
                 value *= 1000.0
-            else:                      # µL -> mL
+            else:
                 value /= 1000.0
         return value
 
 
 if __name__ == "__main__":
     # --- jednostki
-    assert norm_unit("μL/h") == "µL/h"          # μ (U+03BC) -> µ (U+00B5)
+    assert norm_unit("μL/h") == "µL/h"
     assert norm_unit(" mL/h ") == "mL/h"
 
-    # --- przeliczenia (każda asercja prześledzona ręcznie)
+    # --- przeliczenia rate
     assert BasePumpDriver.to_base_unit(2.0, "mL/min", "mL/h") == 120.0
     assert BasePumpDriver.to_base_unit(120.0, "mL/h", "mL/min") == 2.0
     assert BasePumpDriver.to_base_unit(1.0, "µL/h", "mL/h") == 0.001
     assert BasePumpDriver.to_base_unit(1.0, "mL/h", "mL/h") == 1.0
 
-    class _T(BasePumpDriver):
-        capabilities = PumpCapabilities(name="t", rate_units=("mL/h",),
-                                        rate_min=0.01, rate_max=500.0)
-        def query_version(self): return "x"
-        def execute(self, op, **kw): ...
-        def poll(self): ...
-
-    d = _T(transport=None)
-    # model znający tylko mL/h:
-    assert d.validate_rate(250.0, "mL/h") is None
-    assert d.validate_rate(600.0, "mL/h") is not None
-    assert "jednostka" in d.validate_rate(1.0, "L/h")
-    assert d.validate_rate(2.0, "mL/min") is not None   # nieznana jednostka
-
-    class _T2(_T):
-        capabilities = PumpCapabilities(name="t2",
-                                        rate_units=("mL/h", "mL/min"),
-                                        rate_min=0.01, rate_max=500.0)
-    d2 = _T2(transport=None)
-    # model znający mL/h i mL/min — tu działa ścieżka przeliczenia:
-    assert d2.validate_rate(2.0, "mL/min") is None       # -> 120 mL/h
-    assert d2.validate_rate(20.0, "mL/min") is not None  # -> 1200 mL/h
-
-    # --- formatowanie objętości
+    # --- objętości
     assert to_ml(500.0, "µL") == 0.5
     assert to_ml(0.5, "mL") == 0.5 and to_ml(0.5, None) == 0.5
     assert fmt_volume_ml(1.5) == "1.500 mL"
@@ -219,5 +216,45 @@ if __name__ == "__main__":
     assert fmt_volume_ml(0.0004) == "0.400 µL"
     assert fmt_dispensed(50.0, "µL") == "50.000 µL"
     assert fmt_dispensed(1.25, "mL") == "1.250 mL"
+
+    # --- czas (nowe)
+    assert time_to_seconds(30, "s") == 30.0
+    assert time_to_seconds(2, "min") == 120.0
+    assert time_to_seconds(1.5, "h") == 5400.0
+    assert fmt_duration(45) == "45 s"
+    assert fmt_duration(90) == "1.5 min"
+    assert fmt_duration(300) == "5.0 min"
+    assert fmt_duration(3600) == "1.00 h"
+    assert fmt_duration(7260) == "2.02 h"
+
+    # --- nowe operacje i pola
+    assert Op.SET_TARGET_TIME and Op.SET_FORCE
+    st = PumpStatus()
+    assert st.target_time is None and st.force is None
+    caps = PumpCapabilities()
+    assert caps.target_time is False and caps.force_setting is False
+    assert caps.force_range == (1.0, 100.0)
+
+    # --- walidacja rate (regresja)
+    class _T(BasePumpDriver):
+        capabilities = PumpCapabilities(name="t", rate_units=("mL/h",),
+                                        rate_min=0.01, rate_max=500.0)
+        def query_version(self): return "x"
+        def execute(self, op, **kw): ...
+        def poll(self): ...
+
+    d = _T(transport=None)
+    assert d.validate_rate(250.0, "mL/h") is None
+    assert d.validate_rate(600.0, "mL/h") is not None
+    assert "jednostka" in d.validate_rate(1.0, "L/h")
+    assert d.validate_rate(2.0, "mL/min") is not None
+
+    class _T2(_T):
+        capabilities = PumpCapabilities(name="t2",
+                                        rate_units=("mL/h", "mL/min"),
+                                        rate_min=0.01, rate_max=500.0)
+    d2 = _T2(transport=None)
+    assert d2.validate_rate(2.0, "mL/min") is None
+    assert d2.validate_rate(20.0, "mL/min") is not None
 
     print("base: OK")
