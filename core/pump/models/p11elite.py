@@ -6,13 +6,12 @@ z promptami (patrz core/transport/protocol_p11.py); transport wołany
 z until=response_complete zamiast terminatora.
 
 Ograniczenia modelu odwzorowane w capabilities (GUI dostosowuje się
-samo): brak komendy purge (przycisk znika), tvolume w mL/µL (pompa
-zna też nL/pl — v1 ich nie oferuje). GUI ma JEDNO pole rate, a pompa
-dwie stawki (irate/wrate) — driver ustawia obie tą samą wartością.
+samo): brak purge, tvolume/ttime w mL/µL/s. GUI ma JEDNO pole rate,
+pompa dwie stawki (irate/wrate) — driver ustawia obie tą samą.
 
-UWAGA (manual str. 51): komendy parametrów działają z ekranu Quick
-Start pompy; dotknięcie touch screena wstrzymuje sesję do wysłania
-<CR> — kolejna nasza komenda to naprawia (każda ramka ma <CR>).-
+Zmiana średnicy kasuje rate/tvolume w pompie (limity zależą od
+strzykawki) — po SET_DIAMETER cache odświeżany z pompy. Force jest
+od średnicy niezależne.
 """
 
 from __future__ import annotations
@@ -32,6 +31,22 @@ from core.transport.protocol_p11 import (
 FL_TO_ML = 1e-12          # 1 mL = 1e12 fL (status raportuje femtolitry)
 FL_S_TO_ML_H = 3.6e-9    # fL/s -> mL/h
 
+_HMS = re.compile(r"^(\d{1,2}):(\d{1,2}):(\d{1,2})$")
+_SECONDS = re.compile(r"^([\d.]+)\s*seconds?$")
+
+
+def parse_ttime(text: str) -> float | None:
+    """Odpowiedź TTIME -> sekundy; oba formaty manuala.
+
+    '# seconds' albo '##:##:##'. None gdy nie sparsowano.
+    """
+    t = text.strip()
+    if m := _HMS.match(t):
+        return int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+    if m := _SECONDS.match(t):
+        return float(m[1])
+    return None
+
 
 def _fmt(v: float) -> str:
     s = f"{v:.6f}".rstrip("0").rstrip(".")
@@ -47,10 +62,12 @@ class P11EliteDriver(BasePumpDriver):
         directions=("INF", "WDR"),
         volume_units=("mL", "µL"),
         target_volume=True,
-        dispensed_query=True,
+        target_time=True,           # ttime / cttime
         purge=False,                # protokół nie ma odpowiednika purge
         diameter_setting=True,
         diameter_range=(0.103, 50.0),
+        force_setting=True,         # komenda FORCE (1-100%)
+        force_range=(1.0, 100.0),
         set_rate_while_running=True,
     )
 
@@ -71,6 +88,8 @@ class P11EliteDriver(BasePumpDriver):
         self._diameter: float | None = None
         self._target: float | None = None
         self._target_unit: str = "mL"
+        self._target_time: float | None = None      # sekundy
+        self._force: float | None = None            # procent
         self._rate: float | None = None
         self._rate_unit: str = "mL/h"
         self._min_ml_h: float | None = None
@@ -79,7 +98,14 @@ class P11EliteDriver(BasePumpDriver):
     # ------------------------------------------------------------ rdzeń
 
     def _req(self, cmd: str) -> tuple[list[str], str]:
-        """Komenda -> (linie danych, prompt). Błędy -> PumpCommandError."""
+        """Komenda -> (linie danych, prompt). Błędy -> PumpCommandError.
+
+        Kierowca mówi do pompy adresem 0 przez USB — odpowiedzi NIE
+        mają prefiksu adresu (manual: przy USB prefiks zbędny), więc
+        żadnego strip_addr_data tutaj: regex prefiksu.
+        myliłby się z linią czasu '01:30:00' (zjadałby '01:').
+        Pumpy z adresem != 0 (łańcuch RS-485) to osobny, przyszły tryb.
+        """
         data = self.transport.request(cmd.encode("ascii") + b"\r",
                                       until=response_complete)
         if data is None:
@@ -88,7 +114,7 @@ class P11EliteDriver(BasePumpDriver):
         prompt = prompt_of(lines[-1]) if lines else None
         if prompt is None:
             raise PumpCommandError(f"odpowiedź bez promptu: {lines!r}")
-        body = [strip_addr_data(l) for l in lines[:-1]]
+        body = lines[:-1]
         if body and body[0].lower() == cmd.lower():    # echo USB, gdy włączone
             body = body[1:]
         for i, line in enumerate(body):
@@ -127,6 +153,7 @@ class P11EliteDriver(BasePumpDriver):
             self._diameter = float(m[1])
         self._sync_target()
         self._sync_rate()
+        self._sync_force()
         self._sync_limits()
 
     def _sync_target(self) -> None:
@@ -137,11 +164,22 @@ class P11EliteDriver(BasePumpDriver):
             elif m := re.fullmatch(r"([\d.]+)\s*([munp])", body[0]):
                 self._target = float(m[1])
                 self._target_unit = VOL_LETTER_TO_GUI[m[2]]
+        body, _ = self._req("ttime")
+        if body:
+            if "not set" in body[0].lower():
+                self._target_time = None
+            else:
+                self._target_time = parse_ttime(body[0])
 
     def _sync_rate(self) -> None:
         body, _ = self._req("irate")
         if body and (r := parse_rate(body[0])):
             self._rate, self._rate_unit = r["value"], "mL/h"
+
+    def _sync_force(self) -> None:
+        body, _ = self._req("force")
+        if body and (m := re.fullmatch(r"([\d.]+)\s*%", body[0])):
+            self._force = float(m[1])
 
     def _sync_limits(self) -> None:
         """'irate lim' -> min/max rate w mL/h (zależne od strzykawki)."""
@@ -193,6 +231,21 @@ class P11EliteDriver(BasePumpDriver):
                 else:
                     self._req("ctvolume")
                     self._target = None
+            case Op.SET_TARGET_TIME:
+                secs = float(kw["seconds"])
+                if secs > 0:
+                    self._req(f"ttime {_fmt(secs)}")
+                else:
+                    self._req("cttime")
+                self._target_time = secs if secs > 0 else None
+            case Op.SET_FORCE:
+                pct = float(kw["percent"])
+                lo, hi = self.capabilities.force_range
+                if not lo <= pct <= hi:
+                    raise PumpCommandError(
+                        f"siła poza zakresem {lo:g}-{hi:g}%: {pct:g}")
+                self._req(f"force {_fmt(pct)}")
+                self._force = pct
             case Op.SET_DIAMETER:
                 self._req(f"diameter {_fmt(float(kw['mm']))}")
                 self._diameter = float(kw["mm"])
@@ -229,6 +282,8 @@ class P11EliteDriver(BasePumpDriver):
             st = self._status()
         st.target_volume = self._target
         st.target_volume_unit = self._target_unit
+        st.target_time = self._target_time
+        st.force = self._force
         st.diameter = self._diameter
         return st
 
@@ -262,6 +317,8 @@ class P11EliteDriver(BasePumpDriver):
             rate_unit=self._rate_unit,
             target_volume=self._target,
             target_volume_unit=self._target_unit,
+            target_time=self._target_time,
+            force=self._force,
             diameter=self._diameter,
             alarm="S" if self._stalled else None,
         )
@@ -270,8 +327,9 @@ class P11EliteDriver(BasePumpDriver):
 # ---------------------------------------------------------------- testy
 if __name__ == "__main__":
     class FakeP11:
-        """Pump 11 do testów drivera w izolacji (until ignorowane —
-        zawsze zwraca kompletną odpowiedź; parsowanie testuje protocol_p11)."""
+        """Pump 11 do testów drivera w izolacji. Prompt liczony PO
+        wykonaniu komendy (jak w realnej pompie); until ignorowane —
+        zawsze zwraca kompletną odpowiedź."""
         def __init__(self):
             self.sent: list[str] = []
             self.running = False
@@ -279,6 +337,8 @@ if __name__ == "__main__":
             self.diameter = 14.43
             self.rate = (90.0, "m/h")
             self.target: tuple[float, str] | None = None
+            self.ttime_s: float | None = None
+            self.force = 30.0
             self.disp_fl = 5e11
             self.stall = False
             self.echo = True
@@ -304,6 +364,10 @@ if __name__ == "__main__":
             elif cmd.startswith("irate ") and len(cmd.split()) == 3:
                 parts = cmd.split()
                 self.rate = (float(parts[1]), parts[2])
+            elif cmd == "force":
+                lines = [f"{self.force:g}%"]
+            elif cmd.startswith("force "):
+                self.force = float(cmd.split()[1])
             elif cmd == "tvolume":
                 lines = [f"{self.target[0]:g} {self.target[1]}"
                          if self.target else "Target volume not set"]
@@ -312,6 +376,20 @@ if __name__ == "__main__":
                 self.target = (float(v), u)
             elif cmd == "ctvolume":
                 self.target = None
+            elif cmd == "ttime":
+                if self.ttime_s is None:
+                    lines = ["Target time not set"]
+                elif self.ttime_s >= 3600:
+                    h = int(self.ttime_s // 3600)
+                    m = int(self.ttime_s % 3600 // 60)
+                    s = int(self.ttime_s % 60)
+                    lines = [f"{h:02d}:{m:02d}:{s:02d}"]
+                else:
+                    lines = [f"{self.ttime_s:g} seconds"]
+            elif cmd.startswith("ttime "):
+                self.ttime_s = float(cmd.split()[1])
+            elif cmd == "cttime":
+                self.ttime_s = None
             elif cmd in ("irun", "wrun"):
                 self.running = True
                 self.direction = "INF" if cmd == "irun" else "WDR"
@@ -329,7 +407,7 @@ if __name__ == "__main__":
                 rate_fl = int(self.rate[0] * vol * 1e12 / per_h)
                 f1 = ("I" if self.running and self.direction == "INF"
                       else "W" if self.running
-                else "i" if self.direction == "INF" else "w")
+                      else "i" if self.direction == "INF" else "w")
                 # 6 flag: kierunek, limit, stall, trigger, port, target
                 flags = " ".join([f1, ".", "S" if self.stall else ".",
                                   ".", f1, "."])
@@ -344,35 +422,46 @@ if __name__ == "__main__":
                 prompt = ":"
 
             data = b"".join(b"\n" + l.encode() + b"\r" for l in lines) \
-                   + b"\n" + prompt.encode() + b"\r"
+                + b"\n" + prompt.encode() + b"\r"
             if self.echo:
                 data = b"\n" + cmd.encode() + b"\r" + data
             return data
 
+    # --- parse_ttime (module-level, dostępna bezpośrednio)
+    assert parse_ttime("3600 seconds") == 3600.0
+    assert parse_ttime("45.5 seconds") == 45.5
+    assert parse_ttime("1 second") == 1.0
+    assert parse_ttime("01:30:00") == 5400.0
+    assert parse_ttime("00:00:59") == 59.0
+    assert parse_ttime("garbage") is None
+    assert parse_ttime("Target time not set") is None
+
     t = FakeP11()
     d = P11EliteDriver(t)
 
-    # 1. identyfikacja: echo off, ver + sync DIA/TVOL/IRATE/IRATE LIM
+    # 1. identyfikacja: echo off, ver + sync DIA/TVOL/TTIME/IRATE/FORCE/LIM
     assert d.query_version() == "11 Elite 2.0.0.0"
-    assert t.sent == ["echo off", "ver", "diameter",
-                      "tvolume", "irate", "irate lim"]
-    assert not t.echo                          # echo wyłączone
+    assert t.sent == ["echo off", "ver", "diameter", "tvolume", "ttime",
+                      "irate", "force", "irate lim"]
+    assert not t.echo
     assert d._diameter == 14.43 and d._target is None
+    assert d._target_time is None
+    assert d._force == 30.0                    # z pompy, nie domyślny
     assert d._rate == 90.0 and d._rate_unit == "mL/h"
-    assert abs(d._min_ml_h - 1.503e-3) < 1e-6  # 25.05 n/min
-    assert abs(d._max_ml_h - 1561.2) < 1e-6   # 26.02 m/min
+    assert abs(d._min_ml_h - 1.503e-3) < 1e-6
+    assert abs(d._max_ml_h - 1561.2) < 1e-6
 
     # 2. SET_RATE: jedna wartość GUI -> irate + wrate
     d.execute(Op.SET_RATE, value=250, unit="mL/h")
     assert t.sent[-2:] == ["irate 250 m/h", "wrate 250 m/h"]
-    d.execute(Op.SET_RATE, value=120000, unit="μL/h")     # μ -> µ
+    d.execute(Op.SET_RATE, value=120000, unit="μL/h")
     assert t.sent[-2:] == ["irate 120000 u/h", "wrate 120000 u/h"]
 
-    # 3. walidacja z 'irate lim' (w mL/h)
-    assert d.validate_rate(26.0, "mL/min") is None       # 1560 < 1561.2
-    assert d.validate_rate(27.0, "mL/min") is not None   # 1620 > max
-    assert d.validate_rate(0.0001, "mL/h") is not None   # < min
-    assert d.validate_rate(1.0, "L/h") is not None       # nieznana jednostka
+    # 3. walidacja z 'irate lim'
+    assert d.validate_rate(26.0, "mL/min") is None
+    assert d.validate_rate(27.0, "mL/min") is not None
+    assert d.validate_rate(0.0001, "mL/h") is not None
+    assert d.validate_rate(1.0, "L/h") is not None
 
     # 4. START w INF, zmiana kierunku w biegu przez rrun
     d.execute(Op.START)
@@ -380,49 +469,76 @@ if __name__ == "__main__":
     d.execute(Op.SET_DIRECTION, direction="WDR")
     assert t.sent[-1] == "rrun" and d._direction == "WDR"
 
-    # 5. POLL: status -> rate/objętość przeliczone z fL, kierunek WDR
+    # 5. POLL: status + target_time/force z cache
     st = d.poll()
     assert st.running and st.direction == "WDR"
-    assert st.rate == 120.0 and st.rate_unit == "mL/h"   # 120000 µL/h
-    assert abs(st.dispensed - 0.5) < 1e-9 and st.dispensed_unit == "mL"
-    assert st.diameter == 14.43 and st.alarm is None
+    assert st.rate == 120.0 and st.rate_unit == "mL/h"
+    assert abs(st.dispensed - 0.5) < 1e-9
+    assert st.force == 30.0 and st.target_time is None
 
-    # 6. STOP; zmiana kierunku na postoju = tylko cache (użyta w START)
+    # 6. STOP; kierunek na postoju = tylko cache
     d.execute(Op.STOP)
     assert t.sent[-1] == "stop" and not d._running
     d.execute(Op.SET_DIRECTION, direction="INF")
-    assert t.sent[-1] == "stop"                # żadnej komendy nie było
+    assert t.sent[-1] == "stop"
     d.execute(Op.START)
     assert t.sent[-1] == "irun"
+    d.execute(Op.STOP)
 
-    # 7. target volume: mL, µL, 0 = praca ciągła (ctvolume)
+    # 7. target volume: mL, µL, 0 = praca ciągła
     d.execute(Op.SET_TARGET_VOLUME, volume=12.5, unit="mL")
     assert t.sent[-1] == "tvolume 12.5 m"
-    assert d._target == 12.5 and d._target_unit == "mL"
     d.execute(Op.SET_TARGET_VOLUME, volume=500, unit="µL")
     assert t.sent[-1] == "tvolume 500 u"
     d.execute(Op.SET_TARGET_VOLUME, volume=0)
     assert t.sent[-1] == "ctvolume" and d._target is None
 
-    # 8. średnica + re-sync rate/tvolume/limitów (pompa kasuje rate
-    #    przy zmianie strzykawki — limity zależą od strzykawki)
-    d.execute(Op.SET_DIAMETER, mm=20.0)
-    assert t.sent[-4:] == ["diameter 20", "irate", "tvolume", "irate lim"]
-    assert d._diameter == 20.0
+    # 7b. target time (izolowany driver+fake; echo off jak po
+    #     query_version — w realności odczyty zawsze idą bez echa)
+    tf = FakeP11()
+    df = P11EliteDriver(tf)
+    df._req("echo off")
+    assert not tf.echo
+    df.execute(Op.SET_TARGET_TIME, seconds=90)
+    assert tf.sent[-1] == "ttime 90" and df._target_time == 90.0
+    df._sync_target()
+    assert df._target_time == 90.0  # odczyt: '90 seconds'
+    tf.ttime_s = 5400.0
+    df._sync_target()
+    assert df._target_time == 5400.0  # odczyt: '01:30:00'
+    # regresja: '01:30:00' to nie prefiks adresu — _req nie może go zjadać
+    body, _ = df._req("ttime")
+    assert body == ["01:30:00"]
 
-    # 8b. cache rate odświeżany z pompy, nie z GUI
+    # 8. średnica + re-sync (5 komend); force NIE — niezależne od DIA
+    t.ttime_s = 90.0
+    d.execute(Op.SET_DIAMETER, mm=20.0)
+    assert t.sent[-5:] == ["diameter 20", "irate", "tvolume", "ttime",
+                           "irate lim"]
+    assert d._diameter == 20.0
+    assert d._force == 30.0
+
+    # 8b. cache rate odświeżany z pompy
     d._rate, d._rate_unit = 250.0, "mL/h"
     d.execute(Op.SET_DIAMETER, mm=26.59)
-    assert t.sent[-4:] == ["diameter 26.59", "irate", "tvolume",
-                           "irate lim"]
-    # fake trzyma rate z testu 2 (120000 u/h) — nie nasze ręczne 250
-    assert d._rate == 120000.0 and d._rate_unit == "mL/h"
+    assert d._rate == 120000.0                # fake trzyma rate z testu 2
 
-    # 9. zerowanie liczników
+    # 9. force: set z walidacją, odczyt z pompy
+    d.execute(Op.SET_FORCE, percent=45)
+    assert t.sent[-1] == "force 45" and d._force == 45.0
+    for bad in (0, 101, -5):
+        try:
+            d.execute(Op.SET_FORCE, percent=bad)
+            raise AssertionError(f"powinno rzucić: {bad}")
+        except PumpCommandError:
+            pass
+    assert d.poll().force == 45.0
+
+    # 10. zerowanie liczników
     d.execute(Op.CLEAR_DISPENSED)
     assert t.sent[-1] == "cvolume" and t.disp_fl == 0
 
-    # 10. stall: prompt '*' + flaga S -> alarm, bieg stop
+    # 11. stall: prompt '*' + flaga S -> alarm, bieg stop
     t.stall = True
     st = d.execute(Op.START)
     assert st.alarm == "S" and not st.running
@@ -430,7 +546,7 @@ if __name__ == "__main__":
     d.execute(Op.STOP)
     assert d.poll().alarm is None
 
-    # 11. błąd komendy -> PumpCommandError z treścią
+    # 12. błąd komendy -> PumpCommandError z treścią
     class BadP11(FakeP11):
         def request(self, frame, **kw):
             return b"\nCommand error:\nUnknown command\n:\r"
