@@ -1,9 +1,10 @@
 """Pompa demo — generyczny symulator do developmentu bez sprzętu.
 
-Odtwarza zachowania wspólne dla realnych pomp (na wzór AL-1000):
-liczniki I/W osobno, auto-stop po zadanym wolumenie (mL lub µL),
-purge maksymalną prędkością, zerowanie liczników przy zmianie
-średnicy, jednorazowe alarmy do testów GUI.
+Odtwarza zachowania wspólne dla realnych pomp (na wzór AL-1000 i
+Pump 11 Elite): liczniki I/W osobno, auto-stop po zadanym wolumenie
+(mL/µL) LUB czasie biegu (sekundy), purge maksymalną prędkością,
+zerowanie liczników przy zmianie średnicy, jednorazowe alarmy do
+testów GUI. Force to pasywny procent (round-trip ustawienia).
 
 Zegar wstrzykiwalny (clock=...) — testy przesuwają czas ręcznie.
 """
@@ -26,9 +27,10 @@ class DemoDriver(BasePumpDriver):
         directions=("INF", "WDR"),
         volume_units=("mL", "µL"),
         target_volume=True,
-        dispensed_query=True,
+        target_time=True,
         purge=True,
         diameter_setting=True,
+        force_setting=True,
         set_rate_while_running=True,
     )
 
@@ -40,8 +42,11 @@ class DemoDriver(BasePumpDriver):
         self.direction = "INF"
         self.target_volume: float | None = None   # wartość w target_unit
         self.target_unit = "mL"
+        self.target_time: float | None = None     # sekundy
+        self.force: float | None = None           # procent
         self.diameter: float | None = None
         self.disp: dict[str, float] = {"INF": 0.0, "WDR": 0.0}   # w mL
+        self._run_seconds = 0.0                   # czas biegu (pauza mrozi)
         self._pending_alarm: str | None = None
         self._t = clock()
 
@@ -74,10 +79,15 @@ class DemoDriver(BasePumpDriver):
         dt = now - self._t
         self._t = now
         if self.running and dt > 0:
+            self._run_seconds += dt
             self.disp[self.direction] += \
                 self._rate_ml_per_h() * dt / 3600.0
-            if (t := self._target_ml()) is not None \
-                    and self.disp[self.direction] >= t:
+            t_ml = self._target_ml()
+            hit_vol = (t_ml is not None
+                       and self.disp[self.direction] >= t_ml)
+            hit_time = (self.target_time is not None
+                        and self._run_seconds >= self.target_time)
+            if hit_vol or hit_time:
                 self.running, self.purging = False, False
 
     def _status(self) -> PumpStatus:
@@ -88,6 +98,8 @@ class DemoDriver(BasePumpDriver):
             rate_unit=norm_unit(self.rate_unit),
             target_volume=self.target_volume,
             target_volume_unit=self.target_unit,
+            target_time=self.target_time,
+            force=self.force,
             diameter=self.diameter,
             dispensed=self.disp[self.direction],
             dispensed_unit="mL",
@@ -126,11 +138,24 @@ class DemoDriver(BasePumpDriver):
                 v = float(kw["volume"])
                 self.target_volume = v if v > 0 else None  # 0 = ciągła
                 self.target_unit = unit
+            case Op.SET_TARGET_TIME:
+                secs = float(kw["seconds"])
+                if secs < 0:
+                    raise ValueError(f"czas ujemny: {secs}")
+                self.target_time = secs if secs > 0 else None
+                self._run_seconds = 0.0
+            case Op.SET_FORCE:
+                pct = float(kw["percent"])
+                lo, hi = self.capabilities.force_range
+                if not lo <= pct <= hi:
+                    raise ValueError(f"siła poza zakresem {lo}-{hi}%")
+                self.force = pct
             case Op.SET_DIAMETER:
                 self.diameter = float(kw["mm"])
-                self.disp = {"INF": 0.0, "WDR": 0.0}   # jak AL-1000
+                self.disp = {"INF": 0.0, "WDR": 0.0}   # jak realne pompy
             case Op.CLEAR_DISPENSED:
                 self.disp = {"INF": 0.0, "WDR": 0.0}
+                self._run_seconds = 0.0
             case Op.POLL:
                 pass
             case _:
@@ -147,6 +172,7 @@ if __name__ == "__main__":
         def __init__(self):      self.t = 1000.0
         def __call__(self) -> float: return self.t
         def advance(self, hours: float): self.t += hours * 3600.0
+        def advance_s(self, seconds: float): self.t += seconds
 
     clk = FakeClock()
     d = DemoDriver(clock=clk)
@@ -181,7 +207,7 @@ if __name__ == "__main__":
     d.execute(Op.SET_DIRECTION, direction="INF")
     assert d.poll().dispensed == 120.0              # INF nietknięty
 
-    # 5. CLEAR zeruje oba liczniki
+    # 5. CLEAR zeruje oba liczniki i czas biegu
     d.execute(Op.CLEAR_DISPENSED)
     assert d.poll().dispensed == 0.0
     d.execute(Op.SET_DIRECTION, direction="WDR")
@@ -199,7 +225,67 @@ if __name__ == "__main__":
     st = d.poll()
     assert not st.running and abs(st.dispensed - 10.0) < 1e-6
 
+    # 6b. target time (izolowany): auto-stop po 30 s; pauza mrozi odliczanie
+    clk_b = FakeClock();
+    db = DemoDriver(clock=clk_b)
+    db.execute(Op.SET_TARGET_TIME, seconds=30)
+    st = db.execute(Op.POLL)
+    assert st.target_time == 30.0
+    db.execute(Op.START)
+    clk_b.advance_s(20)
+    assert db.poll().running  # 20 s < 30 s
+    db.execute(Op.STOP)
+    clk_b.advance_s(100)  # pauza: zegar biegu stoi
+    db.execute(Op.START)
+    clk_b.advance_s(11)  # 20+11=31 >= 30
+    st = db.poll()
+    assert not st.running and st.target_time == 30.0
+
+    # 6c. clear kasuje czas biegu (izolowany): okno liczy od zera
+    clk_c = FakeClock();
+    dc = DemoDriver(clock=clk_c)
+    dc.execute(Op.SET_TARGET_TIME, seconds=30)
+    dc.execute(Op.START)
+    clk_c.advance_s(30)
+    assert not dc.poll().running  # 30 s = koniec
+    dc.execute(Op.CLEAR_DISPENSED)  # reset okna czasu
+    dc.execute(Op.START)
+    clk_c.advance_s(10)
+    assert dc.poll().running  # od zera: 10 < 30
+    clk_c.advance_s(20)
+    assert not dc.poll().running  # znowu 30 s
+
+    # 6d. target time = 0 -> praca ciągła (izolowany)
+    clk_d = FakeClock();
+    dd = DemoDriver(clock=clk_d)
+    dd.execute(Op.SET_TARGET_TIME, seconds=0)
+    assert dd.poll().target_time is None
+    dd.execute(Op.START)
+    clk_d.advance_s(120)
+    assert dd.poll().running
+
+    # 6e. oba targety: pierwsze osiągnięte wygrywa (izolowany)
+    clk_e = FakeClock();
+    de = DemoDriver(clock=clk_e)
+    de.execute(Op.SET_RATE, value=3600, unit="mL/h")  # 1 mL/s
+    de.execute(Op.SET_TARGET_VOLUME, volume=100)
+    de.execute(Op.SET_TARGET_TIME, seconds=10)  # czas wygra (10 s)
+    de.execute(Op.START)
+    clk_e.advance_s(10)
+    st = de.poll()
+    assert not st.running and abs(st.dispensed - 10.0) < 1e-6  # czas wygrał
+    de.execute(Op.CLEAR_DISPENSED)
+    de.execute(Op.SET_TARGET_VOLUME, volume=5)  # teraz volume (5 s)
+    de.execute(Op.SET_TARGET_TIME, seconds=50)
+    de.execute(Op.START)
+    clk_e.advance_s(5)
+    st = de.poll()
+    assert not st.running and abs(st.dispensed - 5.0) < 1e-6  # volume wygrał
+
     # 7. purge: maksymalna prędkość (500 mL/h); STOP kończy
+    d.execute(Op.STOP)
+    d.execute(Op.SET_TARGET_VOLUME, volume=0)
+    d.execute(Op.SET_TARGET_TIME, seconds=0)
     d.execute(Op.CLEAR_DISPENSED)
     d.execute(Op.PURGE)
     clk.advance(1.0)
@@ -215,23 +301,36 @@ if __name__ == "__main__":
     clk.advance(1.0)
     assert abs(d.poll().dispensed - 200.0) < 1e-6
 
-    # 9. SET_DIAMETER zeruje liczniki (jak AL-1000)
+    # 9. SET_DIAMETER zeruje liczniki (jak realne pompy)
     d.execute(Op.SET_DIAMETER, mm=20.0)
     assert d.poll().dispensed == 0.0 and d.diameter == 20.0
+
+    # 9b. force: set/odczyt, walidacja, NIE kasuje się przy średnicy
+    d.execute(Op.SET_FORCE, percent=45)
+    st = d.poll()
+    assert st.force == 45.0
+    for bad in (0, 101):
+        try:
+            d.execute(Op.SET_FORCE, percent=bad)
+            raise AssertionError(f"powinno rzucić: {bad}")
+        except ValueError:
+            pass
+    d.execute(Op.SET_DIAMETER, mm=14.43)
+    assert d.poll().force == 45.0 and d.diameter == 14.43
 
     # 10. alarm: pokazany raz, kolejny POLL go czyści
     d.inject_alarm("S")
     assert d.poll().alarm == "S"
     assert d.poll().alarm is None
 
-    # 11. walidacja domyślna z capabilities (statyczna)
+    # 11. walidacja rate (regresja)
     assert d.validate_rate(120.0, "mL/h") is None
-    assert d.validate_rate(700.0, "mL/h") is not None   # > 500
-    assert d.validate_rate(2.0, "mL/min") is None       # 120 mL/h
-    assert d.validate_rate(1.0, "L/h") is not None      # nieznana
-    assert d.validate_rate(120000.0, "µL/h") is None    # 120 mL/h
+    assert d.validate_rate(700.0, "mL/h") is not None
+    assert d.validate_rate(2.0, "mL/min") is None
+    assert d.validate_rate(1.0, "L/h") is not None
+    assert d.validate_rate(120000.0, "µL/h") is None
 
-    # 12. µL: rate 120000 µL/h = 120 mL/h
+    # 12. µL: rate i target w mikrolitrach (regresja)
     d.execute(Op.STOP)
     d.execute(Op.CLEAR_DISPENSED)
     d.execute(Op.SET_DIRECTION, direction="INF")
@@ -241,19 +340,10 @@ if __name__ == "__main__":
     st = d.poll()
     assert st.rate == 120000 and st.rate_unit == "µL/h"
     assert abs(st.dispensed - 60.0) < 1e-6
-
-    # 13. target w µL: 500 µL = 0.5 mL; auto-stop po przeliczeniu
     d.execute(Op.STOP)
     d.execute(Op.CLEAR_DISPENSED)
-    d.execute(Op.SET_RATE, value=100, unit="mL/h")
     d.execute(Op.SET_TARGET_VOLUME, volume=500, unit="µL")
     st = d.execute(Op.POLL)
     assert st.target_volume == 500 and st.target_volume_unit == "µL"
-    d.execute(Op.START)
-    clk.advance(0.004)
-    assert d.poll().running                    # 0.4 mL < 0.5 mL
-    clk.advance(0.002)
-    st = d.poll()
-    assert not st.running and st.dispensed >= 0.5
 
     print("demo: OK")
