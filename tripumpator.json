@@ -2,15 +2,26 @@
   "rows": [
     [
       null,
-      "Pompa demo (symulator)"
+      "Pompa demo (symulator)",
+      null
     ],
     [
       null,
-      "Pompa demo (symulator)"
+      "Pompa demo (symulator)",
+      null
     ],
     [
       null,
-      "Pompa demo (symulator)"
+      "Pompa demo (symulator)",
+      null
+    ],
+    [
+      null,
+      "Pompa demo (symulator)",
+      {
+        "diameter": 25.0,
+        "force": 50.0
+      }
     ]
   ]
 }

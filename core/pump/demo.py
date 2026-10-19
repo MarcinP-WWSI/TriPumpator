@@ -28,6 +28,7 @@ class DemoDriver(BasePumpDriver):
         volume_units=("mL", "µL"),
         target_volume=True,
         target_time=True,
+        dispensed_query=True,
         purge=True,
         diameter_setting=True,
         force_setting=True,

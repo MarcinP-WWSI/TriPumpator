@@ -62,8 +62,9 @@ class P11EliteDriver(BasePumpDriver):
         directions=("INF", "WDR"),
         volume_units=("mL", "µL"),
         target_volume=True,
-        target_time=True,           # ttime / cttime
-        purge=False,                # protokół nie ma odpowiednika purge
+        target_time=True,  # ttime / cttime
+        dispensed_query=True,  # status raportuje objętość w fL
+        purge=False,  # protokół nie ma odpowiednika purge
         diameter_setting=True,
         diameter_range=(0.103, 50.0),
         force_setting=True,         # komenda FORCE (1-100%)

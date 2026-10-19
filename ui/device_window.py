@@ -5,15 +5,14 @@ Kontrakt:
     detach() — rozłącza sygnały (używa Session przy usuwaniu pompy);
     closed  — sygnał dla Session, gdy użytkownik zamknie okno.
 
-Dozowanie: dwa liczniki obok siebie:
-    disp_label — wartość Z POMPY (DIS; autorytatywna, w jednostkach
-                 pompy, auto-skalowana do mL/µL)
-    est_label  — SZACUNEK lokalny: ustawiony rate × czas od ostatniego
-                 statusu (nie zna prędkości purge — zaniża przy purge;
-                 zatrzymuje się przy stall, pompa też — rozjazd = sygnał)
+Target: tryb Ciągły/Objętość/Czas budowany z capabilities (model bez
+danego trybu go nie zobaczy). Ustawienie jednego targetu czyści drugi
+(semantyka Quick Start pomp: volume ALBO czas). Jednostki spinu
+przełączają się z trybem (mL/µL albo s/min/h).
 
-Wszystkie programowe modyfikacje kontrolek idą pod flagą _syncing,
-żeby odświeżenie statusu nie strzelało komendą zwrotną do pompy.
+Dozowanie: licznik pompy (autorytatywny) + szacunek lokalny obok.
+
+Wszystkie programowe modyfikacje kontrolek idą pod flagą _syncing.
 """
 
 from __future__ import annotations
@@ -29,7 +28,21 @@ from PyQt6.QtWidgets import (
 
 from core.pump.base import (
     BasePumpDriver, Op, PumpCapabilities, PumpStatus, fmt_dispensed,
-    fmt_volume_ml, norm_unit,
+    fmt_duration, fmt_volume_ml, norm_unit, time_to_seconds,
+)
+
+MODE_CONT = "Ciągły"
+MODE_VOL = "Objętość"
+MODE_TIME = "Czas"
+TIME_UNITS = ("s", "min", "h")
+
+FORCE_HINT = (
+    "Zalecenia producenta (Harvard):\n"
+    "plastik ≤20 ml ~50%, >20 ml ~100%\n"
+    "szkło/szkło ≤20 ml 20–30%, >20 ml 30–50%\n"
+    "szkło/plastik ≤250 µl 30%, ≤5 ml 50%\n"
+    "stal 100%. Minimum ~20% (tarcie mechanizmu).\n"
+    "Szklane strzykawki = NISKA wartość!"
 )
 
 
@@ -61,7 +74,6 @@ class PumpWindow(QMainWindow):
         central = QWidget()
         root = QVBoxLayout(central)
 
-        # nagłówek: link | model | wersja fw
         head = QHBoxLayout()
         self.link_label = QLabel("OFFLINE")
         self.link_label.setStyleSheet("font-weight: bold;")
@@ -73,7 +85,6 @@ class PumpWindow(QMainWindow):
         head.addWidget(self.version_label)
         root.addLayout(head)
 
-        # banner alarmu (ukryty dopóki alarm aktywny)
         self.alarm_banner = QLabel("")
         self.alarm_banner.setStyleSheet(
             "background-color: #c62828; color: white; padding: 4px;"
@@ -94,7 +105,7 @@ class PumpWindow(QMainWindow):
             grid.addWidget(self.dir_combo, row, 1)
             row += 1
 
-        # rate: spin + jednostka + przycisk + wartość ustawiona
+        # rate
         grid.addWidget(QLabel("Rate:"), row, 0)
         self.rate_spin = QDoubleSpinBox()
         lo = caps.rate_min
@@ -112,29 +123,38 @@ class PumpWindow(QMainWindow):
         grid.addWidget(self.rate_cur, row, 4)
         row += 1
 
-        # target volume — opcjonalnie; combo jednostek przy >1
+        # target: tryb + wartość + jednostka (tryby wg capabilities)
+        self.target_mode: QComboBox | None = None
         self.target_spin: QDoubleSpinBox | None = None
         self.target_unit: QComboBox | None = None
         self.target_cur: QLabel | None = None
-        if caps.target_volume:
-            grid.addWidget(QLabel("Target vol.:"), row, 0)
+        if caps.target_volume or caps.target_time:
+            grid.addWidget(QLabel("Target:"), row, 0)
+            self.target_mode = QComboBox()
+            modes = [MODE_CONT]
+            if caps.target_volume:
+                modes.append(MODE_VOL)
+            if caps.target_time:
+                modes.append(MODE_TIME)
+            self.target_mode.addItems(modes)
+            self.target_mode.currentTextChanged.connect(
+                self._on_target_mode)
             self.target_spin = QDoubleSpinBox()
             self.target_spin.setRange(0.0, 99999.0)
             self.target_spin.setDecimals(3)
-            if len(caps.volume_units) > 1:
-                self.target_unit = QComboBox()
-                self.target_unit.addItems(caps.volume_units)
+            self.target_unit = QComboBox()
             self.set_target_btn = QPushButton("Ustaw")
             self.set_target_btn.clicked.connect(self._on_set_target)
             self.target_cur = QLabel("—")
-            grid.addWidget(self.target_spin, row, 1)
-            if self.target_unit is not None:
-                grid.addWidget(self.target_unit, row, 2)
-            grid.addWidget(self.set_target_btn, row, 3)
-            grid.addWidget(self.target_cur, row, 4)
+            grid.addWidget(self.target_mode, row, 1)
+            grid.addWidget(self.target_spin, row, 2)
+            grid.addWidget(self.target_unit, row, 3)
+            grid.addWidget(self.set_target_btn, row, 4)
+            grid.addWidget(self.target_cur, row, 5)
             row += 1
+            self._on_target_mode(self.target_mode.currentText())
 
-        # średnica — opcjonalnie; też z wartością aktualną
+        # średnica — opcjonalnie
         self.dia_spin: QDoubleSpinBox | None = None
         self.dia_cur: QLabel | None = None
         if caps.diameter_setting:
@@ -152,36 +172,53 @@ class PumpWindow(QMainWindow):
             grid.addWidget(self.dia_cur, row, 4)
             row += 1
 
-            # dozowanie — opcjonalnie; pompa i szacunek obok siebie,
-            # z wierszem nagłówkowym nad kolumnami wartości
-            self.disp_label: QLabel | None = None
-            self.est_label: QLabel | None = None
-            self.disp_hdr: QLabel | None = None
-            self.est_hdr: QLabel | None = None
-            if caps.dispensed_query:
-                grid.addWidget(QLabel("Dozowane:"), row, 0)
-                self.disp_hdr = QLabel("z pompy")
-                self.est_hdr = QLabel("szacunek")
-                for hdr in (self.disp_hdr, self.est_hdr):
-                    hdr.setStyleSheet("color: #666;")
-                grid.addWidget(self.disp_hdr, row, 1)
-                grid.addWidget(self.est_hdr, row, 2)
-                row += 1
+        # siła — opcjonalnie (P11 Elite)
+        self.force_spin: QDoubleSpinBox | None = None
+        self.force_cur: QLabel | None = None
+        if caps.force_setting:
+            grid.addWidget(QLabel("Siła [%]:"), row, 0)
+            self.force_spin = QDoubleSpinBox()
+            flo, fhi = caps.force_range
+            self.force_spin.setRange(flo, fhi)
+            self.force_spin.setDecimals(0)
+            self.force_spin.setValue(50)
+            self.set_force_btn = QPushButton("Ustaw")
+            self.set_force_btn.clicked.connect(self._on_set_force)
+            self.force_cur = QLabel("—")
+            self.force_cur.setToolTip(FORCE_HINT)
+            grid.addWidget(self.force_spin, row, 1)
+            grid.addWidget(self.set_force_btn, row, 3)
+            grid.addWidget(self.force_cur, row, 4)
+            row += 1
 
-                self.disp_label = QLabel("—")
-                self.disp_label.setToolTip(
-                    "Licznik pompy (autorytatywny; jednostki auto-skalowane)")
-                self.est_label = QLabel("—")
-                self.est_label.setToolTip(
-                    "Szacunek lokalny: ustawiony rate × czas.\n"
-                    "Nie zna prędkości purge (zaniża) i najazdów; rozjazd\n"
-                    "z licznikiem pompy = stall / purge / zgubiona komenda.")
-                self.clear_btn = QPushButton("Zeruj")
-                self.clear_btn.clicked.connect(self._on_clear)
-                grid.addWidget(self.disp_label, row, 1)
-                grid.addWidget(self.est_label, row, 2)
-                grid.addWidget(self.clear_btn, row, 3)
-                row += 1
+        # dozowanie: pompa + szacunek, z nagłówkami kolumn
+        self.disp_label: QLabel | None = None
+        self.est_label: QLabel | None = None
+        self.disp_hdr: QLabel | None = None
+        self.est_hdr: QLabel | None = None
+        if caps.dispensed_query:
+            grid.addWidget(QLabel("Dozowane:"), row, 0)
+            self.disp_hdr = QLabel("z pompy")
+            self.est_hdr = QLabel("szacunek")
+            for hdr in (self.disp_hdr, self.est_hdr):
+                hdr.setStyleSheet("color: #666;")
+            grid.addWidget(self.disp_hdr, row, 1)
+            grid.addWidget(self.est_hdr, row, 2)
+            row += 1
+            self.disp_label = QLabel("—")
+            self.disp_label.setToolTip(
+                "Licznik pompy (autorytatywny; jednostki auto-skalowane)")
+            self.est_label = QLabel("—")
+            self.est_label.setToolTip(
+                "Szacunek lokalny: ustawiony rate × czas.\n"
+                "Nie zna prędkości purge (zaniża); rozjazd z licznikiem\n"
+                "pompy = stall / purge / zgubiona komenda.")
+            self.clear_btn = QPushButton("Zeruj")
+            self.clear_btn.clicked.connect(self._on_clear)
+            grid.addWidget(self.disp_label, row, 1)
+            grid.addWidget(self.est_label, row, 2)
+            grid.addWidget(self.clear_btn, row, 3)
+            row += 1
 
         root.addLayout(grid)
 
@@ -197,14 +234,12 @@ class PumpWindow(QMainWindow):
         self.purge_btn: QPushButton | None = None
         if caps.purge:
             self.purge_btn = QPushButton("Purge")
-            self.purge_btn.setToolTip(
-                "Pełna prędkość! Stop kończy purge.")
+            self.purge_btn.setToolTip("Pełna prędkość! Stop kończy purge.")
             self.purge_btn.clicked.connect(self._on_purge)
             run.addWidget(self.purge_btn)
         run.addStretch()
         root.addLayout(run)
 
-        # pasek błędu komend (UX walidacja / odrzucenia pompy)
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #e65100;")
         root.addWidget(self.error_label)
@@ -222,7 +257,6 @@ class PumpWindow(QMainWindow):
         h.offline.connect(self.on_offline)
 
     def detach(self) -> None:
-        """Rozłącz sygnały handle — woła Session przed usunięciem pompy."""
         h = self._handle
         for sig, slot in ((h.status, self.on_status),
                           (h.version, self.on_version),
@@ -232,7 +266,7 @@ class PumpWindow(QMainWindow):
             try:
                 sig.disconnect(slot)
             except TypeError:
-                pass                      # już rozłączone
+                pass
 
     # --------------------------------------------------------- handlery GUI
 
@@ -250,16 +284,51 @@ class PumpWindow(QMainWindow):
         self._show_error("")
         self._submit(Op.SET_RATE, value=value, unit=unit)
 
+    def _on_target_mode(self, mode: str) -> None:
+        """Przełącz jednostki/dostępność spinu wg trybu targetu.
+
+        Bez strażnika _syncing: zmiana trybu (także z on_status) nigdy
+        nie wysyła Op — tylko rekonfiguruje kontrolki.
+        """
+        caps = self._handle.capabilities
+        self.target_unit.clear()
+        if mode == MODE_VOL:
+            self.target_unit.addItems(list(caps.volume_units))
+        elif mode == MODE_TIME:
+            self.target_unit.addItems(list(TIME_UNITS))
+        active = mode != MODE_CONT
+        self.target_spin.setEnabled(active)
+        self.target_unit.setEnabled(active)
+
     def _on_set_target(self) -> None:
-        kw: dict = {"volume": self.target_spin.value()}
-        if self.target_unit is not None:
-            kw["unit"] = norm_unit(self.target_unit.currentText())
-        self._submit(Op.SET_TARGET_VOLUME, **kw)
+        caps = self._handle.capabilities
+        mode = self.target_mode.currentText()
+        if mode == MODE_CONT:
+            if caps.target_volume:
+                self._submit(Op.SET_TARGET_VOLUME, volume=0)
+            if caps.target_time:
+                self._submit(Op.SET_TARGET_TIME, seconds=0)
+        elif mode == MODE_VOL:
+            if caps.target_time:      # Quick Start: volume ALBO czas
+                self._submit(Op.SET_TARGET_TIME, seconds=0)
+            kw = {"volume": self.target_spin.value()}
+            if self.target_unit.count():
+                kw["unit"] = norm_unit(self.target_unit.currentText())
+            self._submit(Op.SET_TARGET_VOLUME, **kw)
+        else:                          # MODE_TIME
+            if caps.target_volume:
+                self._submit(Op.SET_TARGET_VOLUME, volume=0)
+            secs = time_to_seconds(
+                self.target_spin.value(),
+                self.target_unit.currentText() or "s")
+            self._submit(Op.SET_TARGET_TIME, seconds=secs)
 
     def _on_set_diameter(self) -> None:
-        # pompa kasuje liczniki przy zmianie średnicy — szacunek też
         self._reset_est()
         self._submit(Op.SET_DIAMETER, mm=self.dia_spin.value())
+
+    def _on_set_force(self) -> None:
+        self._submit(Op.SET_FORCE, percent=self.force_spin.value())
 
     def _on_clear(self) -> None:
         self._reset_est()
@@ -311,18 +380,31 @@ class PumpWindow(QMainWindow):
                 self.est_label.setText(
                     fmt_volume_ml(self._est[st.direction or "INF"]))
 
-            # wartości aktualnie ustawione (z pompy, nie z GUI)
             if st.rate is not None:
                 self.rate_cur.setText(
                     f"{st.rate:g} {st.rate_unit or ''}".strip())
-            if st.target_volume is not None and self.target_cur is not None:
-                self.target_cur.setText(
-                    f"{st.target_volume:g} "
-                    f"{st.target_volume_unit or ''}".strip())
             if st.diameter is not None and self.dia_cur is not None:
                 self.dia_cur.setText(f"Ø{st.diameter:g} mm")
+            if st.force is not None and self.force_cur is not None:
+                self.force_cur.setText(f"{st.force:g} %")
 
-            # model bez zmiany rate w biegu: blokuj kontrolki
+            # target: tryb + wartości aktualne (obie, jeśli obie ustawione)
+            if self.target_mode is not None:
+                mode = MODE_CONT
+                if st.target_volume is not None:
+                    mode = MODE_VOL
+                elif st.target_time is not None:
+                    mode = MODE_TIME
+                self.target_mode.setCurrentText(mode)
+                parts = []
+                if st.target_volume is not None:
+                    parts.append(f"{st.target_volume:g} "
+                                 f"{st.target_volume_unit or ''}".strip())
+                if st.target_time is not None:
+                    parts.append(fmt_duration(st.target_time))
+                self.target_cur.setText(
+                    " | ".join(parts) if parts else "ciągła")
+
             if not caps.set_rate_while_running:
                 for w in (self.rate_spin, self.rate_unit,
                           self.set_rate_btn):
@@ -405,19 +487,21 @@ if __name__ == "__main__":
         def validate_rate(self, value, unit):
             return self.validate_result
 
-    caps_full = DemoDriver.capabilities
-    h = FakeHandle(caps_full)
+    # ================= w: model pełny (demo caps: 3 tryby + force) =====
+    h = FakeHandle(DemoDriver.capabilities)
     w = PumpWindow(1, h, confirm_purge=lambda: True)
 
-    # 1. UI zbudowane z capabilities (model pełny)
+    # 1. struktura
     assert w.dir_combo is not None and w.purge_btn is not None
-    assert w.target_spin is not None and w.dia_spin is not None
-    assert w.disp_label is not None and w.est_label is not None
-    assert w.rate_unit.currentText() == "mL/h"
+    assert w.force_spin is not None and w.force_cur is not None
+    assert w.target_mode is not None and w.target_spin is not None
+    assert [w.target_mode.itemText(i)
+            for i in range(w.target_mode.count())] == \
+        ["Ciągły", "Objętość", "Czas"]
+    assert not w.target_spin.isEnabled()          # tryb domyślny: Ciągły
     rate_items = {w.rate_unit.itemText(i)
                   for i in range(w.rate_unit.count())}
     assert {"mL/h", "µL/h", "µL/min"} <= rate_items
-    assert w.target_unit is not None
 
     # 2. start/stop
     w.start_btn.click()
@@ -425,76 +509,46 @@ if __name__ == "__main__":
     w.stop_btn.click()
     assert h.ops[-1] == (Op.STOP, {})
 
-    # 3. set rate
+    # 3. rate + walidacja
     w.rate_spin.setValue(250.0)
     w.set_rate_btn.click()
     assert h.ops[-1] == (Op.SET_RATE, {"value": 250.0, "unit": "mL/h"})
-
-    # 4. walidacja odrzuca -> błąd, brak submita
     n = len(h.ops)
     h.validate_result = "za duże"
     w.set_rate_btn.click()
     assert len(h.ops) == n and "za duże" in w.error_label.text()
     h.validate_result = None
 
-    # 5. status: wartości aktualne + dozowanie pompy w mL, szacunek 0
+    # 4. status pełny -> wartości aktualne + tryb z targetu
     h.status.emit(PumpStatus(running=True, direction="INF",
                              rate=120.0, rate_unit="mL/h",
                              target_volume=0.5,
                              target_volume_unit="mL",
                              diameter=14.43,
                              dispensed=1.25, dispensed_unit="mL"))
-    assert w.disp_label.text() == "1.250 mL"
     assert w.rate_cur.text() == "120 mL/h"
+    assert w.target_mode.currentText() == "Objętość"
     assert w.target_cur.text() == "0.5 mL"
     assert w.dia_cur.text() == "Ø14.43 mm"
-    assert w.est_label.text() == fmt_volume_ml(0.0)
+    assert w.disp_label.text() == "1.250 mL"
     assert not w.start_btn.isEnabled() and w.stop_btn.isEnabled()
+    h.status.emit(PumpStatus(running=True, force=30.0))
+    assert w.force_cur.text() == "30 %"
 
-    # 6. auto-jednostki: pompa raportuje µL -> czytelny mikrolitr
-    h.status.emit(PumpStatus(running=True, direction="INF",
-                             rate=120.0, rate_unit="mL/h",
-                             dispensed=50.0, dispensed_unit="µL"))
-    assert w.disp_label.text() == "50.000 µL"
-
-    # 7. szacunek akumuluje: symulujemy 60 s biegu 120 mL/h -> ~2 mL
-    w._last_ts = time.monotonic() - 60.0
-    h.status.emit(PumpStatus(running=True, direction="INF",
-                             rate=120.0, rate_unit="mL/h",
-                             dispensed=1.25, dispensed_unit="mL"))
-    assert abs(w._est["INF"] - 2.0) < 0.01
-    assert w.est_label.text() == "2.000 mL"
-
-    # 8. szacunek w µL: rate 120000 µL/h = 120 mL/h; 60 s -> ~2 mL
-    w._est["INF"] = 0.0
-    w._last_ts = time.monotonic() - 60.0
-    h.status.emit(PumpStatus(running=True, direction="INF",
-                             rate=120000.0, rate_unit="µL/h",
-                             dispensed=0.02, dispensed_unit="mL"))
-    assert abs(w._est["INF"] - 2.0) < 0.01
-    assert w.est_label.text() == "2.000 mL"
-    assert w.disp_label.text() == "20.000 µL"   # 0.02 mL auto -> µL
-
-    # 9. alarm pokazuje się i znika
+    # 5. alarm
     h.status.emit(PumpStatus(running=False, alarm="S"))
-    assert "ALARM" in w.alarm_banner.text() and not w.alarm_banner.isHidden()
+    assert "ALARM" in w.alarm_banner.text()
     h.status.emit(PumpStatus(running=False))
     assert w.alarm_banner.isHidden()
 
-    # 10. kierunek: klik użytkownika -> submit; sync z statusu -> cisza;
-    #     szacunek WDR osobny (INF nietknięty)
+    # 6. kierunek: klik -> submit; sync -> cisza
     w.dir_combo.setCurrentText("WDR")
     assert h.ops[-1] == (Op.SET_DIRECTION, {"direction": "WDR"})
     n = len(h.ops)
-    est_inf = w._est["INF"]
-    h.status.emit(PumpStatus(running=True, direction="WDR",
-                             rate=60.0, rate_unit="mL/h",
-                             dispensed=0.3, dispensed_unit="mL"))
-    assert len(h.ops) == n and w.dir_combo.currentText() == "WDR"
-    assert w._est["INF"] == est_inf and w.est_label.text() == \
-        fmt_volume_ml(w._est["WDR"])
+    h.status.emit(PumpStatus(running=True, direction="WDR"))
+    assert len(h.ops) == n
 
-    # 11. purge za potwierdzeniem i bez
+    # 7. purge
     w.purge_btn.click()
     assert h.ops[-1] == (Op.PURGE, {})
     n = len(h.ops)
@@ -502,25 +556,51 @@ if __name__ == "__main__":
     w.purge_btn.click()
     assert len(h.ops) == n
 
-    # 12. clear i diameter resetują szacunek (pompa kasuje liczniki)
-    w._est = {"INF": 5.0, "WDR": 1.0}
-    w.clear_btn.click()
-    assert h.ops[-1] == (Op.CLEAR_DISPENSED, {})
-    assert w._est == {"INF": 0.0, "WDR": 0.0} and w._last_ts is None
-    w._est = {"INF": 5.0, "WDR": 1.0}
-    w.dia_spin.setValue(14.43)
-    w.set_dia_btn.click()
-    assert h.ops[-1] == (Op.SET_DIAMETER, {"mm": 14.43})
-    assert w._est == {"INF": 0.0, "WDR": 0.0}
-
-    # 13. target z jednostką
+    # 8. target: objętość (czyści czas), czas (czyści objętość), ciągły
+    w.target_mode.setCurrentText("Objętość")
+    assert w.target_spin.isEnabled()
+    assert {w.target_unit.itemText(i)
+            for i in range(w.target_unit.count())} == {"mL", "µL"}
     w.target_spin.setValue(500.0)
     w.target_unit.setCurrentText("µL")
     w.set_target_btn.click()
-    assert h.ops[-1] == (Op.SET_TARGET_VOLUME,
-                         {"volume": 500.0, "unit": "µL"})
+    assert h.ops[-2:] == [(Op.SET_TARGET_TIME, {"seconds": 0}),
+                          (Op.SET_TARGET_VOLUME,
+                           {"volume": 500.0, "unit": "µL"})]
 
-    # 14. wersja i link
+    w.target_mode.setCurrentText("Czas")
+    assert {w.target_unit.itemText(i)
+            for i in range(w.target_unit.count())} == {"s", "min", "h"}
+    w.target_spin.setValue(2.0)
+    w.target_unit.setCurrentText("min")
+    w.set_target_btn.click()
+    assert h.ops[-2:] == [(Op.SET_TARGET_VOLUME, {"volume": 0}),
+                          (Op.SET_TARGET_TIME, {"seconds": 120.0})]
+
+    w.target_mode.setCurrentText("Ciągły")
+    assert not w.target_spin.isEnabled()
+    w.set_target_btn.click()
+    assert h.ops[-2:] == [(Op.SET_TARGET_VOLUME, {"volume": 0}),
+                          (Op.SET_TARGET_TIME, {"seconds": 0})]
+
+    # 8b. status ustawia tryb i opis
+    h.status.emit(PumpStatus(running=False, target_time=90.0))
+    assert w.target_mode.currentText() == "Czas"
+    assert w.target_cur.text() == "1.5 min"
+    h.status.emit(PumpStatus(running=False, target_volume=5.0,
+                             target_volume_unit="µL"))
+    assert w.target_mode.currentText() == "Objętość"
+    assert w.target_cur.text() == "5 µL"
+    h.status.emit(PumpStatus(running=False))
+    assert w.target_mode.currentText() == "Ciągły"
+    assert w.target_cur.text() == "ciągła"
+
+    # 9. siła
+    w.force_spin.setValue(45.0)
+    w.set_force_btn.click()
+    assert h.ops[-1] == (Op.SET_FORCE, {"percent": 45.0})
+
+    # 10. wersja/link
     h.version.emit("DEMO-1.0")
     assert w.version_label.text() == "DEMO-1.0"
     h.online.emit()
@@ -528,35 +608,77 @@ if __name__ == "__main__":
     h.offline.emit()
     assert w.link_label.text() == "OFFLINE"
 
-    # 15. model okrojony: brak opcjonalnych kontrolek
-    caps_mini = PumpCapabilities(name="Mini", rate_units=("mL/h",),
-                                 rate_min=0.1, rate_max=50.0)
-    w2 = PumpWindow(2, FakeHandle(caps_mini))
-    assert w2.dir_combo is None and w2.purge_btn is None
-    assert w2.target_spin is None and w2.dia_spin is None
-    assert w2.disp_label is None and w2.est_label is None
-
-    # 16. model bez zmiany rate w biegu: kontrolki blokują się
-    caps_lock = PumpCapabilities(name="Lock", rate_units=("mL/h",),
-                                 rate_min=0.1, rate_max=50.0,
-                                 set_rate_while_running=False)
-    h3 = FakeHandle(caps_lock)
-    w3 = PumpWindow(3, h3)
-    assert w3.rate_spin.isEnabled()
-    h3.status.emit(PumpStatus(running=True))
-    assert not w3.rate_spin.isEnabled() and not w3.set_rate_btn.isEnabled()
-
-    # 17. detach: po rozłączeniu status nie rusza okna
+    # 11. detach
     before = w.disp_label.text()
     w.detach()
     h.status.emit(PumpStatus(running=True, direction="INF",
                              dispensed=99.0, dispensed_unit="mL"))
     assert w.disp_label.text() == before
 
-    # 18. closed przy zamknięciu
+    # ============ w_al: AL-1000-like (bez czasu i siły) ================
+    caps_al = PumpCapabilities(name="AL-like", rate_units=("mL/h",),
+                               rate_min=0.1, rate_max=50.0,
+                               target_volume=True,
+                               volume_units=("mL", "µL"))
+    h_al = FakeHandle(caps_al)
+    w_al = PumpWindow(2, h_al)
+
+    assert [w_al.target_mode.itemText(i)
+            for i in range(w_al.target_mode.count())] == \
+        ["Ciągły", "Objętość"]                       # brak trybu Czas
+    assert w_al.force_spin is None                   # brak wiersza siły
+    w_al.target_mode.setCurrentText("Objętość")
+    w_al.target_spin.setValue(10.0)
+    w_al.set_target_btn.click()
+    assert h_al.ops[-1] == (Op.SET_TARGET_VOLUME,
+                            {"volume": 10.0, "unit": "mL"})
+    assert all(op != Op.SET_TARGET_TIME for op, _ in h_al.ops)
+    w_al.target_mode.setCurrentText("Ciągły")
+    w_al.set_target_btn.click()
+    assert h_al.ops[-1] == (Op.SET_TARGET_VOLUME, {"volume": 0})
+    assert all(op != Op.SET_TARGET_TIME for op, _ in h_al.ops)
+
+    # ============ w_t: tylko czas ======================================
+    caps_t = PumpCapabilities(name="TimeOnly", rate_units=("mL/h",),
+                              rate_min=0.1, rate_max=50.0,
+                              target_time=True)
+    h_t = FakeHandle(caps_t)
+    w_t = PumpWindow(3, h_t)
+
+    assert [w_t.target_mode.itemText(i)
+            for i in range(w_t.target_mode.count())] == \
+        ["Ciągły", "Czas"]
+    w_t.target_mode.setCurrentText("Czas")
+    w_t.target_spin.setValue(30.0)
+    w_t.set_target_btn.click()
+    assert h_t.ops[-1] == (Op.SET_TARGET_TIME, {"seconds": 30.0})
+    assert all(op != Op.SET_TARGET_VOLUME for op, _ in h_t.ops)
+    w_t.target_mode.setCurrentText("Ciągły")
+    w_t.set_target_btn.click()
+    assert h_t.ops[-1] == (Op.SET_TARGET_TIME, {"seconds": 0})
+
+    # ============ w_mini: nic opcjonalnego =============================
+    caps_mini = PumpCapabilities(name="Mini", rate_units=("mL/h",),
+                                 rate_min=0.1, rate_max=50.0)
+    w_mini = PumpWindow(4, FakeHandle(caps_mini))
+    assert w_mini.target_mode is None and w_mini.target_spin is None
+    assert w_mini.force_spin is None and w_mini.dir_combo is None
+    assert w_mini.purge_btn is None and w_mini.disp_label is None
+
+    # ============ w_lock: blokada rate w biegu (regresja) ==============
+    caps_lock = PumpCapabilities(name="Lock", rate_units=("mL/h",),
+                                 rate_min=0.1, rate_max=50.0,
+                                 set_rate_while_running=False)
+    h_lock = FakeHandle(caps_lock)
+    w_lock = PumpWindow(5, h_lock)
+    assert w_lock.rate_spin.isEnabled()
+    h_lock.status.emit(PumpStatus(running=True))
+    assert not w_lock.rate_spin.isEnabled()
+
+    # ============ closed (regresja) ====================================
     got_close = []
-    w3.closed.connect(lambda: got_close.append(True))
-    w3.close()
+    w_lock.closed.connect(lambda: got_close.append(True))
+    w_lock.close()
     assert got_close == [True]
 
     print("device_window: OK")

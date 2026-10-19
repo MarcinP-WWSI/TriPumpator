@@ -115,7 +115,8 @@ class PumpCapabilities:
     directions: tuple[str, ...] = ("INF",)
     volume_units: tuple[str, ...] = ("mL",)
     target_volume: bool = False
-    target_time: bool = False        # AL-1000: brak w protokole
+    target_time: bool = False  # AL-1000: brak w protokole
+    dispensed_query: bool = False  # model raportuje dozowaną objętość
     purge: bool = False
     diameter_setting: bool = False
     diameter_range: tuple[float, float] = (0.1, 50.0)  # mm
@@ -256,5 +257,9 @@ if __name__ == "__main__":
     d2 = _T2(transport=None)
     assert d2.validate_rate(2.0, "mL/min") is None
     assert d2.validate_rate(20.0, "mL/min") is not None
+
+    caps_q = PumpCapabilities(dispensed_query=True)
+    assert caps_q.dispensed_query is True
+    assert PumpCapabilities().dispensed_query is False  # domyślnie off
 
     print("base: OK")

@@ -62,12 +62,17 @@ class Session(QObject):
 
     # ------------------------------------------------------------- start
 
-    def start(self, config: list[tuple[str | None, str]]) -> None:
-        """config z selectora: [(port|None, model_key), ...]."""
+    def start(self, config: list) -> None:
+        """config z selectora: [(port|None, model_key, setup|None), ...].
+
+        Wpisy 2-elementowe (bez setupu) też są akceptowane.
+        """
         if self._pumps:
             raise RuntimeError("sesja już wystartowana")
 
-        for pid, (port, model_key) in enumerate(config, start=1):
+        for pid, item in enumerate(config, start=1):
+            port, model_key = item[0], item[1]
+            setup = item[2] if len(item) > 2 else None
             try:
                 handle = self._factory(port, model_key)
             except Exception:
@@ -91,6 +96,15 @@ class Session(QObject):
             win.show()
 
             handle.start()                  # wątek w górę jako OSTATNI
+
+            # wartości startowe z selectora: średnica PIERW (jej zmiana
+            # kasuje rate/limity na pompie), potem siła; rate/target
+            # ustawia użytkownik w oknie pompy po starcie
+            if setup:
+                if "diameter" in setup:
+                    handle.submit(Op.SET_DIAMETER, mm=setup["diameter"])
+                if "force" in setup:
+                    handle.submit(Op.SET_FORCE, percent=setup["force"])
 
         self.main_panel = MainPanel()
         self.main_panel.set_pumps(

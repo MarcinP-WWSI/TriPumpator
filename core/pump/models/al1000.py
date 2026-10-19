@@ -382,6 +382,11 @@ if __name__ == "__main__":
         def request(self, frame):
             return bytes([STX]) + b"0S?NA" + bytes([ETX])
 
+    # 11. deklaratywne niewspieranie: target czasu i siły (manual AL-1000
+    #     nie definiuje zadnego odpowiednika TTIME/FORCE w RS-232)
+    assert AL1000Driver.capabilities.target_time is False
+    assert AL1000Driver.capabilities.force_setting is False
+
     d2 = AL1000Driver(_BadTransport())
     try:
         d2.execute(Op.START)
