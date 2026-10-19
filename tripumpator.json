@@ -3,17 +3,18 @@
     [
       null,
       "Pompa demo (symulator)",
-      null
+      {
+        "diameter": 25.0,
+        "force": 50.0
+      }
     ],
     [
       null,
       "Pompa demo (symulator)",
-      null
-    ],
-    [
-      null,
-      "Pompa demo (symulator)",
-      null
+      {
+        "diameter": 25.0,
+        "force": 50.0
+      }
     ],
     [
       null,

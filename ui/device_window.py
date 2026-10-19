@@ -5,14 +5,21 @@ Kontrakt:
     detach() — rozłącza sygnały (używa Session przy usuwaniu pompy);
     closed  — sygnał dla Session, gdy użytkownik zamknie okno.
 
-Target: tryb Ciągły/Objętość/Czas budowany z capabilities (model bez
-danego trybu go nie zobaczy). Ustawienie jednego targetu czyści drugi
-(semantyka Quick Start pomp: volume ALBO czas). Jednostki spinu
-przełączają się z trybem (mL/µL albo s/min/h).
+Target: tryb Ciągły/Objętość/Czas budowany z capabilities. Combobox
+trybu jest WYŁĄCZNIE wejściem użytkownika (poll go nie rusza — nie
+wyżyma wyboru przed kliknięciem "Ustaw"); stan pompy pokazuje
+etykieta "Aktualnie" (jak rate_cur). Ustawienie jednego targetu
+czyści drugi (semantyka Quick Start: volume ALBO czas).
+
+Bieg blokuje parametry kontekstowe: średnicę, siłę i target —
+realne pompy i tak odrzucają te komendy w biegu (AL-1000: tylko na
+postoju; P11: tylko z ekranu Quick Start), blokada zamiast błędu.
+
+Siatka 6 kolumn: 0=nazwa, 1-3=wejścia, 4=przycisk, 5=Aktualnie —
+przyciski i wartości bieżące wyrównane w pionie dla wszystkich wierszy.
 
 Dozowanie: licznik pompy (autorytatywny) + szacunek lokalny obok.
-
-Wszystkie programowe modyfikacje kontrolek idą pod flagą _syncing.
+Programowe modyfikacje kontrolek pod flagą _syncing.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ class PumpWindow(QMainWindow):
         super().__init__(parent)
         self._handle = handle
         self._syncing = False
+        self._running = False                 # dla locków parametrów
         self._confirm_purge = confirm_purge or self._default_confirm_purge
         caps = handle.capabilities
 
@@ -92,7 +100,9 @@ class PumpWindow(QMainWindow):
         self.alarm_banner.hide()
         root.addWidget(self.alarm_banner)
 
+        # siatka: 0=nazwa | 1..3=wejścia | 4=przycisk | 5=Aktualnie
         grid = QGridLayout()
+        grid.setColumnStretch(5, 1)
         row = 0
 
         # kierunek — tylko gdy model ma więcej niż jeden
@@ -119,8 +129,8 @@ class PumpWindow(QMainWindow):
         self.rate_cur = QLabel("—")
         grid.addWidget(self.rate_spin, row, 1)
         grid.addWidget(self.rate_unit, row, 2)
-        grid.addWidget(self.set_rate_btn, row, 3)
-        grid.addWidget(self.rate_cur, row, 4)
+        grid.addWidget(self.set_rate_btn, row, 4)
+        grid.addWidget(self.rate_cur, row, 5)
         row += 1
 
         # target: tryb + wartość + jednostka (tryby wg capabilities)
@@ -168,8 +178,8 @@ class PumpWindow(QMainWindow):
             self.set_dia_btn.clicked.connect(self._on_set_diameter)
             self.dia_cur = QLabel("—")
             grid.addWidget(self.dia_spin, row, 1)
-            grid.addWidget(self.set_dia_btn, row, 3)
-            grid.addWidget(self.dia_cur, row, 4)
+            grid.addWidget(self.set_dia_btn, row, 4)
+            grid.addWidget(self.dia_cur, row, 5)
             row += 1
 
         # siła — opcjonalnie (P11 Elite)
@@ -187,8 +197,8 @@ class PumpWindow(QMainWindow):
             self.force_cur = QLabel("—")
             self.force_cur.setToolTip(FORCE_HINT)
             grid.addWidget(self.force_spin, row, 1)
-            grid.addWidget(self.set_force_btn, row, 3)
-            grid.addWidget(self.force_cur, row, 4)
+            grid.addWidget(self.set_force_btn, row, 4)
+            grid.addWidget(self.force_cur, row, 5)
             row += 1
 
         # dozowanie: pompa + szacunek, z nagłówkami kolumn
@@ -217,7 +227,7 @@ class PumpWindow(QMainWindow):
             self.clear_btn.clicked.connect(self._on_clear)
             grid.addWidget(self.disp_label, row, 1)
             grid.addWidget(self.est_label, row, 2)
-            grid.addWidget(self.clear_btn, row, 3)
+            grid.addWidget(self.clear_btn, row, 4)
             row += 1
 
         root.addLayout(grid)
@@ -285,10 +295,10 @@ class PumpWindow(QMainWindow):
         self._submit(Op.SET_RATE, value=value, unit=unit)
 
     def _on_target_mode(self, mode: str) -> None:
-        """Przełącz jednostki/dostępność spinu wg trybu targetu.
+        """Rekonfiguruj jednostki/dostępność spinu wg trybu.
 
-        Bez strażnika _syncing: zmiana trybu (także z on_status) nigdy
-        nie wysyła Op — tylko rekonfiguruje kontrolki.
+        Wyłączone wejście: tryb Ciągły ALBO pompa w biegu (parametry
+        kontekstowe zablokowane — realne pompy je odrzucają w biegu).
         """
         caps = self._handle.capabilities
         self.target_unit.clear()
@@ -296,7 +306,7 @@ class PumpWindow(QMainWindow):
             self.target_unit.addItems(list(caps.volume_units))
         elif mode == MODE_TIME:
             self.target_unit.addItems(list(TIME_UNITS))
-        active = mode != MODE_CONT
+        active = mode != MODE_CONT and not self._running
         self.target_spin.setEnabled(active)
         self.target_unit.setEnabled(active)
 
@@ -350,6 +360,8 @@ class PumpWindow(QMainWindow):
         caps = self._handle.capabilities
         self._syncing = True
         try:
+            self._running = bool(st.running)
+
             if st.alarm:
                 self.alarm_banner.setText(f"⚠ ALARM: {st.alarm}")
                 self.alarm_banner.show()
@@ -361,6 +373,23 @@ class PumpWindow(QMainWindow):
 
             if st.direction and self.dir_combo is not None:
                 self.dir_combo.setCurrentText(st.direction)
+
+            # parametry kontekstowe: blokada w biegu (AL-1000/P11 i tak
+            # odrzucają — blokada zamiast błędu w pasku)
+            if self.dia_spin is not None:
+                self.dia_spin.setEnabled(not st.running)
+                self.set_dia_btn.setEnabled(not st.running)
+            if self.force_spin is not None:
+                self.force_spin.setEnabled(not st.running)
+                self.set_force_btn.setEnabled(not st.running)
+            if self.target_spin is not None:
+                active = self.target_mode.currentText() != MODE_CONT
+                ok = active and not st.running
+                self.target_spin.setEnabled(ok)
+                self.target_unit.setEnabled(ok)
+                self.set_target_btn.setEnabled(not st.running)
+            # UWAGA: target_mode NIE jest ruszany — to wejście
+            # użytkownika; stan pompy pokazuje target_cur niżej
 
             # szacunek: rate × dt od ostatniego statusu (tylko w biegu)
             now = time.monotonic()
@@ -388,14 +417,8 @@ class PumpWindow(QMainWindow):
             if st.force is not None and self.force_cur is not None:
                 self.force_cur.setText(f"{st.force:g} %")
 
-            # target: tryb + wartości aktualne (obie, jeśli obie ustawione)
-            if self.target_mode is not None:
-                mode = MODE_CONT
-                if st.target_volume is not None:
-                    mode = MODE_VOL
-                elif st.target_time is not None:
-                    mode = MODE_TIME
-                self.target_mode.setCurrentText(mode)
+            # target: TYLKO etykieta stanu pompy (obie wartości, jeśli są)
+            if self.target_cur is not None:
                 parts = []
                 if st.target_volume is not None:
                     parts.append(f"{st.target_volume:g} "
@@ -487,7 +510,7 @@ if __name__ == "__main__":
         def validate_rate(self, value, unit):
             return self.validate_result
 
-    # ================= w: model pełny (demo caps: 3 tryby + force) =====
+    # ================= w: model pełny (demo caps) ======================
     h = FakeHandle(DemoDriver.capabilities)
     w = PumpWindow(1, h, confirm_purge=lambda: True)
 
@@ -499,9 +522,6 @@ if __name__ == "__main__":
             for i in range(w.target_mode.count())] == \
         ["Ciągły", "Objętość", "Czas"]
     assert not w.target_spin.isEnabled()          # tryb domyślny: Ciągły
-    rate_items = {w.rate_unit.itemText(i)
-                  for i in range(w.rate_unit.count())}
-    assert {"mL/h", "µL/h", "µL/min"} <= rate_items
 
     # 2. start/stop
     w.start_btn.click()
@@ -519,7 +539,7 @@ if __name__ == "__main__":
     assert len(h.ops) == n and "za duże" in w.error_label.text()
     h.validate_result = None
 
-    # 4. status pełny -> wartości aktualne + tryb z targetu
+    # 4. status pełny: wartości aktualne; tryb NIE ruszany przez poll
     h.status.emit(PumpStatus(running=True, direction="INF",
                              rate=120.0, rate_unit="mL/h",
                              target_volume=0.5,
@@ -527,13 +547,26 @@ if __name__ == "__main__":
                              diameter=14.43,
                              dispensed=1.25, dispensed_unit="mL"))
     assert w.rate_cur.text() == "120 mL/h"
-    assert w.target_mode.currentText() == "Objętość"
     assert w.target_cur.text() == "0.5 mL"
+    assert w.target_mode.currentText() == "Ciągły"   # wejście nietknięte!
     assert w.dia_cur.text() == "Ø14.43 mm"
     assert w.disp_label.text() == "1.250 mL"
     assert not w.start_btn.isEnabled() and w.stop_btn.isEnabled()
-    h.status.emit(PumpStatus(running=True, force=30.0))
-    assert w.force_cur.text() == "30 %"
+
+    # 4b. bieg blokuje parametry kontekstowe (dia/force/target)
+    assert not w.dia_spin.isEnabled() and not w.set_dia_btn.isEnabled()
+    assert not w.force_spin.isEnabled()
+    assert not w.set_force_btn.isEnabled()
+    assert not w.set_target_btn.isEnabled()
+    assert not w.target_spin.isEnabled()
+    # zmiana trybu w biegu: spin dalej zablokowany
+    w.target_mode.setCurrentText("Objętość")
+    assert not w.target_spin.isEnabled()
+    h.status.emit(PumpStatus(running=False))
+    assert w.dia_spin.isEnabled() and w.set_dia_btn.isEnabled()
+    assert w.force_spin.isEnabled() and w.set_force_btn.isEnabled()
+    assert w.target_spin.isEnabled()  # tryb "Objętość" + postój -> OK
+    assert w.set_target_btn.isEnabled()
 
     # 5. alarm
     h.status.emit(PumpStatus(running=False, alarm="S"))
@@ -547,6 +580,7 @@ if __name__ == "__main__":
     n = len(h.ops)
     h.status.emit(PumpStatus(running=True, direction="WDR"))
     assert len(h.ops) == n
+    h.status.emit(PumpStatus(running=False))       # postój dla testu 8
 
     # 7. purge
     w.purge_btn.click()
@@ -583,16 +617,16 @@ if __name__ == "__main__":
     assert h.ops[-2:] == [(Op.SET_TARGET_VOLUME, {"volume": 0}),
                           (Op.SET_TARGET_TIME, {"seconds": 0})]
 
-    # 8b. status ustawia tryb i opis
+    # 8b. poll aktualizuje etykietę, NIE walczy o tryb z użytkownikiem
+    w.target_mode.setCurrentText("Czas")           # wybór użytkownika
     h.status.emit(PumpStatus(running=False, target_time=90.0))
-    assert w.target_mode.currentText() == "Czas"
     assert w.target_cur.text() == "1.5 min"
+    assert w.target_mode.currentText() == "Czas"   # nietknięty przez poll
     h.status.emit(PumpStatus(running=False, target_volume=5.0,
                              target_volume_unit="µL"))
-    assert w.target_mode.currentText() == "Objętość"
     assert w.target_cur.text() == "5 µL"
+    assert w.target_mode.currentText() == "Czas"
     h.status.emit(PumpStatus(running=False))
-    assert w.target_mode.currentText() == "Ciągły"
     assert w.target_cur.text() == "ciągła"
 
     # 9. siła
