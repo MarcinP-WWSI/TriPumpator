@@ -396,45 +396,65 @@ if __name__ == "__main__":
     w._refresh_list(2)
     assert w.steps_list.item(2).text() == "Start pomp [wszystkie]"
 
-    # 4. walidacja z przycisku Run: zła procedura -> błąd w labelu
+    # 4. walidacja z Run: zła procedura -> błąd, runner nie startuje
     w._steps.insert(3, CommandStep(ProcCmd.SET_FORCE, (1,),
-                                   {"percent": 200}))       # poza zakresem
+                                   {"percent": 200}))  # poza zakresem
     w._refresh_list(3)
     w._on_run()
     assert "zakresem" in w.error_label.text()
-    assert not w.runner_running_flag_for_test()              # nie ruszyło
+    assert not w._runner.is_running() and w.run_btn.isEnabled()
 
-    # 5. popraw procedurę i uruchom (bez WAIT -> synchroniczny finish)
-    w._steps[3] = CommandStep(ProcCmd.SET_FORCE, (1,), {"percent": 50})
-    w._refresh_list(3)
+    # 5. popraw i uruchom: pętla ×5 z ciałem (START wewnątrz pętli),
+    #    SET_FORCE po pętli (przygotowane w 4 na pozycji za LoopEnd)
+    w._steps.clear()
+    w._steps.extend([
+        LoopStartStep(5),
+        CommandStep(ProcCmd.START, None),  # wewnątrz pętli
+        LoopEndStep(),
+        CommandStep(ProcCmd.SET_FORCE, (1,), {"percent": 50}),
+    ])
+    w._refresh_list(0)
     w._on_run()
     assert h1.ops[-1] == (Op.SET_FORCE, {"percent": 50.0})
-    # pętla ×5 -> START wykonany 5x na obu pompach
     starts1 = [op for op, _ in h1.ops if op is Op.START]
-    assert len(starts1) == 5
+    assert len(starts1) == 5  # ×5, ciało = START
+    starts2 = [op for op, _ in h2.ops if op is Op.START]
+    assert len(starts2) == 5  # None -> wszystkie pompy
     assert w.status_label.text() == "zakończono"
     assert w.run_btn.isEnabled() and not w.stop_btn.isEnabled()
 
-    # 6. stop w biegu (WAIT) -> przerwano
+    # 6. WAIT 10 s -> bieg; stop -> przerwano; przyciski wróciły
     w._steps.append(CommandStep(ProcCmd.WAIT, None, {"seconds": 10.0}))
     w._refresh_list()
     w._on_run()
-    assert w.stop_btn.isEnabled()
+    assert w._runner.is_running() and w.stop_btn.isEnabled()
+    assert not w.run_btn.isEnabled()
     w._on_stop()
     assert w.status_label.text() == "przerwano"
+    assert w.run_btn.isEnabled() and not w.stop_btn.isEnabled()
 
-    # 7. edycja/paleta zablokowane w biegu (guard is_running)
-    assert w._runner.is_running() is False        # po stopie
-    # ...sprawdzone w 6: po stopie przyciski wracają
+    # 7. zamknięcie okna w biegu zatrzymuje runnera
+    w._steps.append(CommandStep(ProcCmd.WAIT, None, {"seconds": 30.0}))
+    w._refresh_list()
+    w._on_run()
+    assert w._runner.is_running()
+    w.close()  # closeEvent -> stop
+    assert not w._runner.is_running()
+    got_close = []
+    # closed już wyemitowane przy close(); nowy ProgramatorWindow:
+    w2 = ProgramatorWindow(handles)
+    w2.closed.connect(lambda: got_close.append(True))
+    w2.close()
+    assert got_close == [True]
 
-    # 8. usuwanie i przesuwanie (regresja listy)
+    # 8. usuwanie i przesuwanie (bez wyjątków; listwa spójna)
     n = w.steps_list.count()
     w.steps_list.setCurrentRow(3)
     w._on_delete()
     assert w.steps_list.count() == n - 1
     w.steps_list.setCurrentRow(0)
+    before = w.steps_list.item(0).text()
     w._move(+1)
-    assert w.steps_list.item(0).text() != "PĘTLA ×5" or True
-    # (dokładny tekst zależny od kolejności — sprawdzamy tylko brak wyjątku)
+    assert w.steps_list.item(1).text() == before  # przesunięty w dół
 
     print("programator_window: OK")
