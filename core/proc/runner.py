@@ -61,6 +61,10 @@ class ProcedureRunner(QObject):
     def is_running(self) -> bool:
         return self._running
 
+    def is_waiting(self) -> bool:
+        """True gdy procedura wstrzymana na WAIT (timer aktywny)."""
+        return self._timer is not None
+
     def run(self, steps: list) -> bool:
         """Zwaliduj i wykonaj procedurę. False = odrzucono (błąd walidacji
         albo runner już aktywny) — szczegóły w sygnale error."""
@@ -235,7 +239,7 @@ if __name__ == "__main__":
     ]
     assert r.run(proc)
     assert h1.ops[-1] == (Op.START, {}) and h2.ops[-1] == (Op.START, {})
-    assert not r.is_running()                 # czeka na WAIT
+    assert r.is_running() and r.is_waiting()  # czeka na WAIT 0.2 s            # czeka na WAIT
     assert wait_for(lambda: finished == [True])
     assert h1.ops[-1] == (Op.STOP, {})        # stop poszedł do obu
     # STOP (1,) po wait — ostatni op h2 to nadal START:
@@ -269,10 +273,10 @@ if __name__ == "__main__":
     # 3. zagnieżdżone pętle ×2/×2: wewn. 4×, zewn. kroki 2×
     h1.ops.clear(); seen.clear(); finished.clear()
     proc3 = [
-        LoopStartStep(2),                          # zewnętrzna
+        LoopStartStep(2),  # zewnętrzna
         CommandStep(ProcCmd.START, (1,)),
-        LoopStartStep(2),                          # wewnętrzna
-        CommandStep(ProcCmd.WAIT, None, {"seconds": 0.05}),
+        LoopStartStep(2),  # wewnętrzna
+        CommandStep(ProcCmd.WAIT, None, {"seconds": 0.1}),
         LoopEndStep(),
         CommandStep(ProcCmd.STOP, (1,)),
         LoopEndStep(),
@@ -296,11 +300,13 @@ if __name__ == "__main__":
         CommandStep(ProcCmd.WAIT, None, {"seconds": 5.0}),
         CommandStep(ProcCmd.STOP, None),
     ])
-    assert r2.is_running()
+    assert r2.is_running() and r2.is_waiting()
     r2.stop()
     assert stopped == [True] and finished == []
+    assert not r2.is_running() and not r2.is_waiting()
     assert wait_for(lambda: True)                  # pętla zdarzeń: nic nie leci
-    assert finished == []                          # STOP nie doszedł
+    assert finished == []
+    # STOP nie doszedł
 
     # 5. run po stopie działa; błąd walidacji zgłaszany; pusta -> finish
     assert r2.run([CommandStep(ProcCmd.START, (1,))])

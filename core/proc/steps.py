@@ -126,12 +126,14 @@ def describe(step: Step) -> str:
                 body = f"{a.get('percent')}%"
             elif cmd is ProcCmd.SET_DIRECTION:
                 body = str(a.get("direction"))
-            text = f"{spec.label}: {body}".strip()
-            if spec.needs_pumps:  # WAIT: bez znacznika pomp
+            parts = [spec.label]
+            if body:
+                parts[0] += f": {body}"
+            if spec.needs_pumps:
                 who = "wszystkie" if p is None else \
                     ",".join(str(x) for x in p)
-                text += f" [{who}]"
-            return text
+                parts.append(f"[{who}]")
+            return " ".join(parts)
 
 
 def validate(steps: list[Step],
