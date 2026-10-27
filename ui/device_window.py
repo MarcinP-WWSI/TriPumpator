@@ -44,12 +44,13 @@ MODE_TIME = "Czas"
 TIME_UNITS = ("s", "min", "h")
 
 FORCE_HINT = (
-    "Zalecenia producenta (Harvard):\n"
-    "plastik ≤20 ml ~50%, >20 ml ~100%\n"
-    "szkło/szkło ≤20 ml 20–30%, >20 ml 30–50%\n"
-    "szkło/plastik ≤250 µl 30%, ≤5 ml 50%\n"
-    "stal 100%. Minimum ~20% (tarcie mechanizmu).\n"
-    "Szklane strzykawki = NISKA wartość!"
+    "<b>Zalecenia producenta</b> (Harvard):\n <br>"
+    "<b>plastik</b> ≤20 ml ~50%, >20 ml ~100%\n <br>"
+    "<b>szkło/szkło</b> ≤20 ml 20–30%, >20 ml 30–50%\n <br>"
+    "<b>szkło/plastik</b> ≤250 µl 30%, ≤5 ml 50%\n <br>"
+    "<b>stal</b> 100%.\n <br>"
+    "<b>Minimum ~20% (tarcie mechanizmu).</b>\n <br>"
+    "<b>Szklane strzykawki = NISKA wartość!</b> <br>"
 )
 
 

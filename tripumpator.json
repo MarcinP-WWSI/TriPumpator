@@ -4,7 +4,7 @@
       null,
       "Pompa demo (symulator)",
       {
-        "diameter": 25.0,
+        "diameter": 26.0,
         "force": 50.0
       }
     ],
@@ -13,14 +13,14 @@
       "Pompa demo (symulator)",
       {
         "diameter": 25.0,
-        "force": 50.0
+        "force": 51.0
       }
     ],
     [
       null,
       "Pompa demo (symulator)",
       {
-        "diameter": 25.0,
+        "diameter": 27.0,
         "force": 50.0
       }
     ]
