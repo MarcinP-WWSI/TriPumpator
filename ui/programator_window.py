@@ -22,7 +22,7 @@ from core.pump.worker import PumpHandle
 from core.proc.runner import ProcedureRunner
 from core.proc.steps import (
     CommandStep, CommandSpec, ConditionStep, LoopEndStep, LoopStartStep,
-    ProcCmd, PROC_COMMANDS, CONDITIONS, describe,
+    ProcCmd, PROC_COMMANDS, CONDITIONS, describe, CondCmd
 )
 
 _TIME_UNITS = ("s", "min", "h")
@@ -241,8 +241,7 @@ class ProgramatorWindow(QMainWindow):
         self.palette = QListWidget()
         for spec in PROC_COMMANDS.values():
             self.palette.addItem(spec.label)
-        for spec in CONDITIONS.values():
-            self.palette.addItem(spec.label)  # sekcja warunków
+        self.palette.addItem("Warunek…")
         self.palette.itemClicked.connect(self._on_palette)
         pal_col.addWidget(self.palette)
         cols.addLayout(pal_col, 1)
@@ -304,28 +303,17 @@ class ProgramatorWindow(QMainWindow):
         if self._runner.is_running():
             return
         label = item.text()
-        # najpierw warunki (mają własny label-space), potem komendy
-        cond_spec = next((s for s in CONDITIONS.values()
-                          if s.label == label), None)
-        if cond_spec is not None:
-            step = ConditionStep(next(
-                c for c, s in CONDITIONS.items() if s is cond_spec),
-                pids0[0] if (pids0 := list(self._handles)) else 1)
-            pos = self._sel() + 1 if self._sel() >= 0 \
-                else len(self._steps)
-            dlg = _StepDialog(step, list(self._handles),
-                              {p: h.capabilities
-                               for p, h in self._handles.items()}, self)
-            if dlg.exec():
-                self._steps.insert(pos, dlg.result_step())
-                self._refresh_list(pos)
-            return
-        spec = next(s for s in PROC_COMMANDS.values() if s.label == label)
-        step = CommandStep(spec.cmd)
         pos = self._sel() + 1 if self._sel() >= 0 else len(self._steps)
-        dlg = _StepDialog(step, list(self._handles),
-                          {p: h.capabilities
-                           for p, h in self._handles.items()}, self)
+        caps_map = {p: h.capabilities for p, h in self._handles.items()}
+        pids = list(self._handles)
+        if label == "Warunek…":
+            step = ConditionStep(CondCmd.STOPPED,
+                                 pids[0] if pids else 1)
+        else:
+            spec = next(s for s in PROC_COMMANDS.values()
+                        if s.label == label)
+            step = CommandStep(spec.cmd)
+        dlg = _StepDialog(step, pids, caps_map, self)
         if dlg.exec():
             self._steps.insert(pos, dlg.result_step())
             self._refresh_list(pos)
@@ -465,13 +453,11 @@ if __name__ == "__main__":
 
     w = ProgramatorWindow(handles)
 
-    # 1. struktura: paleta = komendy + warunki (z rejestrów), listwa pusta
-    assert w.palette.count() == \
-           len(PROC_COMMANDS) + len(CONDITIONS)
+    # 1. struktura: paleta = komendy + jedno wejście "Warunek…"
+    assert w.palette.count() == len(PROC_COMMANDS) + 1
     labels = {w.palette.item(i).text()
               for i in range(w.palette.count())}
-    assert "Start pomp" in labels and "Czekaj" in labels
-    assert "pompa zatrzymana" in labels  # warunki na palecie
+    assert "Start pomp" in labels and "Warunek…" in labels
     assert w.steps_list.count() == 0
     assert w.run_btn.isEnabled() and not w.stop_btn.isEnabled()
 
@@ -553,10 +539,9 @@ if __name__ == "__main__":
     w._move(+1)
     assert w.steps_list.item(1).text() == before  # przesunięty w dół
 
-    # 9. warunki w palecie i na liście (dialog pomijamy — modalny)
-    labels = {w.palette.item(i).text()
-              for i in range(w.palette.count())}
-    assert "dozowane >=" in labels and "pompa zatrzymana" in labels
+    # 9. warunki: NIE na palecie (jedno wejście "Warunek…"); opis na
+    #    liście dalej z describe
+    assert "pompa zatrzymana" not in labels
     from core.proc.steps import ConditionStep, CondCmd
 
     w._steps.append(ConditionStep(CondCmd.STOPPED, 1, timeout_s=60.0))
