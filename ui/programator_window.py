@@ -17,12 +17,12 @@ from PyQt6.QtWidgets import (
     QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
-from core.pump.base import PumpCapabilities
+from core.pump.base import PumpCapabilities, PumpStatus
 from core.pump.worker import PumpHandle
 from core.proc.runner import ProcedureRunner
 from core.proc.steps import (
-    CommandStep, CommandSpec, LoopEndStep, LoopStartStep, ProcCmd,
-    PROC_COMMANDS, describe,
+    CommandStep, CommandSpec, ConditionStep, LoopEndStep, LoopStartStep,
+    ProcCmd, PROC_COMMANDS, CONDITIONS, describe,
 )
 
 _TIME_UNITS = ("s", "min", "h")
@@ -52,6 +52,50 @@ class _StepDialog(QDialog):
             lay.addWidget(QLabel("Powtórzenia pętli:"))
             self.count_spin = _spin(1, 999, 0, float(step.count))
             lay.addWidget(self.count_spin)
+            self.extra_box = None
+        elif isinstance(step, ConditionStep):
+            from core.proc.steps import CONDITIONS, ON_TIMEOUT
+            lay.addWidget(QLabel("Warunek:"))
+            self.cond_combo = QComboBox()
+            for spec in CONDITIONS.values():
+                self.cond_combo.addItem(spec.label)
+            self.cond_combo.setCurrentText(CONDITIONS[step.cond].label)
+            lay.addWidget(self.cond_combo)
+
+            lay.addWidget(QLabel("Pompa:"))
+            self.cond_pump_combo = QComboBox()
+            for pid in pids:
+                self.cond_pump_combo.addItem(f"pompa {pid}", pid)
+            i = self.cond_pump_combo.findData(step.pump)
+            self.cond_pump_combo.setCurrentIndex(max(i, 0))
+            lay.addWidget(self.cond_pump_combo)
+
+            # argumenty (widoczne tylko dla warunków, które je mają)
+            self.cond_value_spin = _spin(val=float(
+                step.args.get("value", 1.0)))
+            self.cond_unit_combo = QComboBox()
+            ref = caps[pids[0]] if pids else None
+            if ref:
+                self.cond_unit_combo.addItems(list(ref.volume_units))
+            self.cond_unit_combo.setCurrentText(
+                step.args.get("unit", ref.volume_units[0] if ref
+                else "mL"))
+            lay.addWidget(self.cond_value_spin)
+            lay.addWidget(self.cond_unit_combo)
+            self.cond_combo.currentTextChanged.connect(
+                self._on_cond_changed)
+            self._on_cond_changed(self.cond_combo.currentText())
+
+            lay.addWidget(QLabel("Timeout [s]:"))
+            self.cond_timeout_spin = _spin(0.1, 99999.0, 1,
+                                           float(step.timeout_s))
+            lay.addWidget(self.cond_timeout_spin)
+
+            lay.addWidget(QLabel("Po timeout:"))
+            self.cond_on_timeout_combo = QComboBox()
+            self.cond_on_timeout_combo.addItems(list(ON_TIMEOUT))
+            self.cond_on_timeout_combo.setCurrentText(step.on_timeout)
+            lay.addWidget(self.cond_on_timeout_combo)
             self.extra_box = None
         else:
             self.count_spin = None
@@ -114,10 +158,37 @@ class _StepDialog(QDialog):
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
+    def _on_cond_changed(self, label: str) -> None:
+        """Pokaż/ukryj pola argumentów wg warunku (tylko DISPENSED_GE)."""
+        from core.proc.steps import CondCmd
+        has_args = label == "dozowane >="
+        self.cond_value_spin.setVisible(has_args)
+        self.cond_unit_combo.setVisible(has_args)
+        # etykieta nie jest potrzebna — spin pojawia się tuż pod "Pompa:"
+        # poprawka UX: doklejamy opis wartości
+        self.cond_value_spin.setToolTip(
+            "próg dozowanej objętości (mL/µL)" if has_args else "")
+
+    def _cond_result_step(self, step: ConditionStep) -> ConditionStep:
+        from core.proc.steps import CONDITIONS
+        cond = next(c for c, s in CONDITIONS.items()
+                    if s.label == self.cond_combo.currentText())
+        pump = self.cond_pump_combo.currentData()
+        args: dict = {}
+        if cond is CondCmd.DISPENSED_GE:
+            args = {"value": self.cond_value_spin.value(),
+                    "unit": self.cond_unit_combo.currentText()}
+        return ConditionStep(cond, pump, args,
+                             timeout_s=self.cond_timeout_spin.value(),
+                             on_timeout=self.cond_on_timeout_combo
+                             .currentText())
+
     def result_step(self):
         """Nowy krok z pól dialogu (bez walidacji — robi caller)."""
         if self.count_spin is not None:
             return LoopStartStep(int(self.count_spin.value()))
+        if isinstance(self._step, ConditionStep):
+            return self._cond_result_step(self._step)
         spec = PROC_COMMANDS[self._step.cmd]
         args = {}
         for name, w in self._fields.items():
@@ -170,6 +241,8 @@ class ProgramatorWindow(QMainWindow):
         self.palette = QListWidget()
         for spec in PROC_COMMANDS.values():
             self.palette.addItem(spec.label)
+        for spec in CONDITIONS.values():
+            self.palette.addItem(spec.label)  # sekcja warunków
         self.palette.itemClicked.connect(self._on_palette)
         pal_col.addWidget(self.palette)
         cols.addLayout(pal_col, 1)
@@ -231,6 +304,22 @@ class ProgramatorWindow(QMainWindow):
         if self._runner.is_running():
             return
         label = item.text()
+        # najpierw warunki (mają własny label-space), potem komendy
+        cond_spec = next((s for s in CONDITIONS.values()
+                          if s.label == label), None)
+        if cond_spec is not None:
+            step = ConditionStep(next(
+                c for c, s in CONDITIONS.items() if s is cond_spec),
+                pids0[0] if (pids0 := list(self._handles)) else 1)
+            pos = self._sel() + 1 if self._sel() >= 0 \
+                else len(self._steps)
+            dlg = _StepDialog(step, list(self._handles),
+                              {p: h.capabilities
+                               for p, h in self._handles.items()}, self)
+            if dlg.exec():
+                self._steps.insert(pos, dlg.result_step())
+                self._refresh_list(pos)
+            return
         spec = next(s for s in PROC_COMMANDS.values() if s.label == label)
         step = CommandStep(spec.cmd)
         pos = self._sel() + 1 if self._sel() >= 0 else len(self._steps)
@@ -304,7 +393,10 @@ class ProgramatorWindow(QMainWindow):
         self._runner.stop()
 
     def _on_step(self, index: int, total: int, text: str) -> None:
-        self.status_label.setText(f"krok {index + 1}/{total}: {text}")
+        if "Czekaj aż" in text:
+            self.status_label.setText(f"krok {index + 1}/{total}: {text}")
+        else:
+            self.status_label.setText(f"krok {index + 1}/{total}: {text}")
 
     def _on_finished(self) -> None:
         self.status_label.setText("zakończono")
@@ -373,10 +465,14 @@ if __name__ == "__main__":
 
     w = ProgramatorWindow(handles)
 
-    # 1. struktura: paleta wygenerowana z rejestru, listwa pusta
-    assert w.palette.count() == len(PROC_COMMANDS)
+    # 1. struktura: paleta = komendy + warunki (z rejestrów), listwa pusta
+    assert w.palette.count() == \
+           len(PROC_COMMANDS) + len(CONDITIONS)
+    labels = {w.palette.item(i).text()
+              for i in range(w.palette.count())}
+    assert "Start pomp" in labels and "Czekaj" in labels
+    assert "pompa zatrzymana" in labels  # warunki na palecie
     assert w.steps_list.count() == 0
-    assert not w.run_btn.isEnabled() or w.run_btn.isEnabled()  # stan idle
     assert w.run_btn.isEnabled() and not w.stop_btn.isEnabled()
 
     # 2. pętla: para kroków wchodzi na listwę, edycja zmienia licznik
@@ -456,5 +552,36 @@ if __name__ == "__main__":
     before = w.steps_list.item(0).text()
     w._move(+1)
     assert w.steps_list.item(1).text() == before  # przesunięty w dół
+
+    # 9. warunki w palecie i na liście (dialog pomijamy — modalny)
+    labels = {w.palette.item(i).text()
+              for i in range(w.palette.count())}
+    assert "dozowane >=" in labels and "pompa zatrzymana" in labels
+    from core.proc.steps import ConditionStep, CondCmd
+
+    w._steps.append(ConditionStep(CondCmd.STOPPED, 1, timeout_s=60.0))
+    w._refresh_list()
+    assert w.steps_list.item(w.steps_list.count() - 1).text() == \
+           "Czekaj aż pompa zatrzymana [pompa 1] (max 60 s)"
+
+    # 10. procedura z bramką przechodzi walidację i biegnie
+    #     (świeże handl'e, żeby nie szumiały poprzednie testy)
+    h1b, h2b = FakeHandle(demo), FakeHandle(demo)
+    wb = ProgramatorWindow({1: h1b, 2: h2b})
+    wb._steps.extend([
+        CommandStep(ProcCmd.START, (1,)),
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=2.0),
+        CommandStep(ProcCmd.STOP, (1,)),
+    ])
+    wb._refresh_list(0)
+    wb._on_run()
+    assert wb._runner.is_running()  # czeka na bramkę
+    h1b._s.status.emit(PumpStatus(running=True))
+    assert wb._runner.is_running()  # pracuje -> czeka dalej
+    h1b._s.status.emit(PumpStatus(running=False))  # STOPPED spełnione
+    # direct-emit w GUI-wątku: bramka zwolniona synchronicznie, STOP poszedł
+    assert h1b.ops[-1] == (Op.STOP, {})
+    assert wb.status_label.text() == "zakończono"
+    wb.close()
 
     print("programator_window: OK")
