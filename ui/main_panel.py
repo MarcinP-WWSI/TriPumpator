@@ -31,6 +31,7 @@ class MainPanel(QMainWindow):
     start_all = pyqtSignal()
     stop_all = pyqtSignal()
     end_session = pyqtSignal()
+    open_programator = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,6 +56,11 @@ class MainPanel(QMainWindow):
         self.end_btn.clicked.connect(self.end_session.emit)
         for b in (self.start_all_btn, self.stop_all_btn, self.end_btn):
             head.addWidget(b)
+
+        self.btn_prog = QPushButton("⚙ Programator")
+        self.btn_prog.clicked.connect(self.open_programator.emit)
+        head.addWidget(self.btn_prog)
+
         head.addStretch()
         head.addWidget(self.online_label)
         root.addLayout(head)

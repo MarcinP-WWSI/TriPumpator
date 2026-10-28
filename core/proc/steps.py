@@ -81,6 +81,39 @@ PROC_COMMANDS: dict[ProcCmd, CommandSpec] = {
         ProcCmd.WAIT, "Czekaj", ("seconds",), None, needs_pumps=False),
 }
 
+class CondCmd(Enum):
+    """Warunki bramek 'czekaj aż'. Odczytywane z PumpStatus (fizyka)."""
+    STOPPED = auto()       # pompa zatrzymana (m.in. target osiągnięty)
+    RUNNING = auto()       # pompa pracuje
+    DISPENSED_GE = auto()  # dozowane >= value (wspólny mianownik: mL)
+    ALARM = auto()         # alarm aktywny (np. stall)
+
+
+@dataclass(frozen=True)
+class ConditionSpec:
+    cmd: CondCmd
+    label: str
+    args: tuple[str, ...] = ()
+
+
+CONDITIONS: dict[CondCmd, ConditionSpec] = {
+    CondCmd.STOPPED: ConditionSpec(CondCmd.STOPPED, "pompa zatrzymana"),
+    CondCmd.RUNNING: ConditionSpec(CondCmd.RUNNING, "pompa pracuje"),
+    CondCmd.DISPENSED_GE: ConditionSpec(
+        CondCmd.DISPENSED_GE, "dozowane >=", ("value", "unit")),
+    CondCmd.ALARM: ConditionSpec(CondCmd.ALARM, "alarm aktywny"),
+}
+
+ON_TIMEOUT = ("error", "continue")
+
+
+@dataclass
+class ConditionStep:
+    cond: CondCmd
+    pump: int                      # dokładnie JEDNA pompa (walidowane)
+    args: dict = field(default_factory=dict)
+    timeout_s: float = 60.0
+    on_timeout: str = "error"      # co po przekroczeniu timeoutu
 
 @dataclass
 class CommandStep:
@@ -99,7 +132,7 @@ class LoopEndStep:
     pass
 
 
-Step = CommandStep | LoopStartStep | LoopEndStep
+Step = CommandStep | LoopStartStep | LoopEndStep | ConditionStep
 
 
 def describe(step: Step) -> str:
@@ -109,6 +142,13 @@ def describe(step: Step) -> str:
             return f"PĘTLA ×{c}"
         case LoopEndStep():
             return "KONIEC PĘTLI"
+        case ConditionStep(cond=c, pump=p, args=a, timeout_s=t):
+            spec = CONDITIONS[c]
+            body = ""
+            if c is CondCmd.DISPENSED_GE:
+                body = f" {a.get('value')} {a.get('unit')}"
+            return (f"Czekaj aż {spec.label}{body} [pompa {p}] "
+                    f"(max {t:g} s)")
         case CommandStep(cmd=cmd, pumps=p, args=a):
             spec = PROC_COMMANDS[cmd]
             body = ""
@@ -166,7 +206,37 @@ def validate(steps: list[Step],
                         f"{pos}: koniec pętli bez początku")
                 else:
                     stack.pop()
-
+            case ConditionStep(cond=cond, pump=pid, args=a,
+                               timeout_s=ts, on_timeout=ot):
+                spec = CONDITIONS.get(cond)
+                if spec is None:
+                    errors.append(f"{pos}: nieznany warunek {cond}")
+                    continue
+                if pid not in caps:
+                    errors.append(f"{pos}: pompa {pid} nie istnieje "
+                                  f"w sesji")
+                    continue
+                if not MIN_WAIT_S <= ts <= MAX_WAIT_S:
+                    errors.append(
+                        f"{pos}: timeout poza zakresem "
+                        f"{MIN_WAIT_S}-{MAX_WAIT_S:g} s: {ts}")
+                if ot not in ON_TIMEOUT:
+                    errors.append(
+                        f"{pos}: on_timeout musi być jednym z "
+                        f"{ON_TIMEOUT}: {ot!r}")
+                if cond is CondCmd.DISPENSED_GE:
+                    if not caps[pid].dispensed_query:
+                        errors.append(
+                            f"{pos}: pompa {pid} nie raportuje objętości")
+                    for name in spec.args:
+                        if name not in a:
+                            errors.append(
+                                f"{pos}: warunek bez argumentu '{name}'")
+                    unit = norm_unit(a.get("unit", ""))
+                    if "unit" in a and unit not in caps[pid].volume_units:
+                        errors.append(
+                            f"{pos}: jednostka {unit} spoza listy "
+                            f"objętości modelu (pompa {pid})")
             case CommandStep(cmd=cmd):
                 spec = PROC_COMMANDS.get(cmd)
                 if spec is None:
@@ -347,5 +417,56 @@ if __name__ == "__main__":
     ok = [CommandStep(ProcCmd.SET_RATE, (1,),
                       {"value": 500, "unit": "μL/min"})]   # μ U+03BC
     assert validate(ok, caps) == []
+
+    # 9. warunki: opisy, walidacja, bramka STOPPED jako "IF target"
+    #    (bez self-importu! klasy są już w zasięgu tego modułu)
+    assert describe(ConditionStep(CondCmd.STOPPED, 1)) == \
+           "Czekaj aż pompa zatrzymana [pompa 1] (max 60 s)"
+    assert describe(ConditionStep(CondCmd.DISPENSED_GE, 2,
+                                  {"value": 5, "unit": "mL"},
+                                  timeout_s=120.0)) == \
+           "Czekaj aż dozowane >= 5 mL [pompa 2] (max 120 s)"
+
+    # procedura "IF target": start, czekaj aż zatrzymana, dopiero dalej
+    proc_if = [
+        CommandStep(ProcCmd.SET_TARGET_VOLUME, (1,),
+                    {"volume": 5.0, "unit": "mL"}),
+        CommandStep(ProcCmd.START, (1,)),
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=3600.0),
+        CommandStep(ProcCmd.START, (2,)),
+    ]
+    assert validate(proc_if, caps) == [], validate(proc_if, caps)
+
+    # błędy: pompa nie istnieje / timeout / on_timeout
+    assert any("nie istnieje" in e for e in validate(
+        [ConditionStep(CondCmd.STOPPED, 9)], caps))
+    assert any("timeout poza zakresem" in e for e in validate(
+        [ConditionStep(CondCmd.STOPPED, 1, timeout_s=0.01)], caps))
+    assert any("on_timeout" in e for e in validate(
+        [ConditionStep(CondCmd.STOPPED, 1, on_timeout="skip")], caps))
+
+    # błędy: brak argumentu, zła jednostka
+    assert any("bez argumentu" in e for e in validate(
+        [ConditionStep(CondCmd.DISPENSED_GE, 1, {"value": 5})], caps))
+    assert any("spoza listy" in e for e in validate(
+        [ConditionStep(CondCmd.DISPENSED_GE, 1,
+                       {"value": 5, "unit": "nL"})], caps))
+
+    # negatywny "nie raportuje": pompa celowo BEZ dispensed_query
+    # (al-like ma je od dawna — stara asercja na pid 2 testowała lukę,
+    #  która nie istnieje)
+    caps_bare = PumpCapabilities(name="Bare", rate_units=("mL/h",),
+                                 rate_min=0.1, rate_max=50.0)
+    caps3 = dict(caps)
+    caps3[3] = caps_bare
+    assert any("nie raportuje" in e for e in validate(
+        [ConditionStep(CondCmd.DISPENSED_GE, 3,
+                       {"value": 5, "unit": "mL"})], caps3)), \
+        "Bare nie ma dispensed_query — walidator ma to łapać"
+
+    # RUNNING/ALARM bez argumentów: przechodzą czysto
+    assert validate([ConditionStep(CondCmd.RUNNING, 1),
+                     ConditionStep(CondCmd.ALARM, 2)], caps) == []
+
 
     print("steps: OK")

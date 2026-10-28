@@ -23,6 +23,7 @@ from core.pump.base import Op, PumpStatus
 from core.pump.worker import PumpHandle, make_pump
 from ui.device_window import PumpWindow
 from ui.main_panel import MainPanel
+from ui.programator_window import ProgramatorWindow
 
 
 class _PumpRelay(QObject):
@@ -58,6 +59,7 @@ class Session(QObject):
         self._link_state: dict[int, bool] = {}
         self._last_version: dict[int, str] = {}
         self.main_panel: MainPanel | None = None
+        self._programator: ProgramatorWindow | None = None
         self._shutting_down = False
 
     # ------------------------------------------------------------- start
@@ -118,6 +120,7 @@ class Session(QObject):
         self.main_panel.start_all.connect(self.start_all)
         self.main_panel.stop_all.connect(self.stop_all)
         self.main_panel.end_session.connect(self.shutdown_all)
+        self.main_panel.open_programator.connect(self.open_programator)
         self.main_panel.show()
 
     # --------------------------------------------------- operacje globalne
@@ -129,6 +132,16 @@ class Session(QObject):
     def stop_all(self) -> None:
         for h in self._pumps.values():
             h.submit(Op.STOP)
+
+    # -------------------------------------------------------- programator
+
+    def open_programator(self) -> None:
+        """Pokaż Programator (jedna instancja na sesję, nieomalne)."""
+        if self._programator is None:
+            self._programator = ProgramatorWindow(self._pumps)
+        self._programator.show()
+        self._programator.raise_()
+        self._programator.activateWindow()
 
     # --------------------------------------------------- routing do panelu
 
@@ -182,6 +195,9 @@ class Session(QObject):
         self._shutting_down = True
         for pid in list(self._pumps):
             self.remove_pump(pid)
+        if self._programator is not None:
+            prog, self._programator = self._programator, None
+            prog.close()  # closeEvent stopuje runnera, jeśli biegnie
         if self.main_panel is not None:
             panel, self.main_panel = self.main_panel, None
             panel.close()              # end_session -> shutdown_all: no-op
@@ -271,6 +287,21 @@ if __name__ == "__main__":
     assert fakes[1].closed and got_end == [True] and session._pumps == {}
     session.shutdown_all()            # idempotentne
     assert got_end == [True]
+
+    # A2. programator: instancja + shutdown zamyka (świeża sescja A3)
+    fakes_b = [FakeHandle(), FakeHandle()]
+    idx = [0]
+    session_p = Session(pump_factory=lambda port, key:
+    idx.append(1) or fakes_b[len(idx) - 2])
+    session_p.start([(None, DEMO), (None, DEMO)])
+    session_p.main_panel.open_programator.emit()
+    assert session_p._programator is not None
+    pw1 = session_p._programator
+    session_p.main_panel.open_programator.emit()
+    assert session_p._programator is pw1
+    session_p.shutdown_all()
+    assert session_p._programator is None  # zamknięty w shutdown
+
 
     # ================= B: integracja z prawdziwymi wątkami (demo) =======
     def wait(cond, timeout: float = 6.0) -> bool:

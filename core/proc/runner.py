@@ -18,9 +18,11 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from core.pump.base import Op
 from core.pump.worker import PumpHandle
+from core.pump.base import Op, PumpStatus, to_ml
+from core.pump.worker import PumpHandle
 from core.proc.steps import (
-    CommandStep, LoopEndStep, LoopStartStep, ProcCmd,
-    describe, validate,
+    CommandStep, CondCmd, ConditionStep, LoopEndStep, LoopStartStep,
+    ProcCmd, describe, validate,
 )
 
 # bezpiecznik: procedura z pętlami ma twardy limit wykonanych kroków
@@ -55,6 +57,15 @@ class ProcedureRunner(QObject):
         self._loop_stack: list[list] = []  # [start_idx, pozostalo]
         self._running = False
         self._timer: QTimer | None = None
+        self._cond: tuple[ConditionStep, float] | None = None
+        # (krok, deadline monotonic) — aktywna bramka, jeśli czekamy
+        self._cond_timer: QTimer | None = None
+        # słuchamy statusów WSZYSTKICH pomp (ocena bramki na żywo)
+        self._relays: list = []
+        for pid, h in self._handles.items():
+            relay = _CondRelay(pid, self)
+            h.status.connect(relay.on_status)
+            self._relays.append(relay)
 
     # ------------------------------------------------------------- API
 
@@ -84,10 +95,11 @@ class ProcedureRunner(QObject):
         return True
 
     def stop(self) -> None:
-        """Przerwij bieg: ucieka bieżące czekanie, nic nie emituje z błędu."""
+        """Przerwij bieg: ucieka WAIT/bramkę, nic nie wysyła do pomp."""
         if not self._running:
             return
         self._running = False
+        self._leave_condition()
         if self._timer is not None:
             self._timer.stop()
             self._timer.deleteLater()
@@ -133,6 +145,10 @@ class ProcedureRunner(QObject):
                 else:
                     self._loop_stack.pop()
                 continue
+            if isinstance(step, ConditionStep):
+                self._emit_progress(step)
+                self._enter_condition(step)
+                return  # _advance z timera/statusu
             # CommandStep
             self._emit_progress(step)
             if step.cmd is ProcCmd.WAIT:
@@ -164,6 +180,76 @@ class ProcedureRunner(QObject):
     def _emit_progress(self, step) -> None:
         self.step_changed.emit(self._pos, len(self._steps), describe(step))
 
+    def _enter_condition(self, step: ConditionStep) -> None:
+        """Otwórz bramkę: ocena na statusach pompy kroku, timeout na
+        QTimer."""
+        import time as _t
+        self._cond = (step, _t.monotonic() + step.timeout_s)
+        self._cond_timer = QTimer(self)
+        self._cond_timer.setSingleShot(True)
+        self._cond_timer.timeout.connect(self._on_cond_timeout)
+        self._cond_timer.start(int(step.timeout_s * 1000))
+
+    def _leave_condition(self) -> None:
+        self._cond = None
+        if self._cond_timer is not None:
+            self._cond_timer.stop()
+            self._cond_timer.deleteLater()
+            self._cond_timer = None
+
+    def _on_pump_status(self, pid: int, st: PumpStatus) -> None:
+        """Status pompy pid: jeśli bramka czeka NA TĘ pompę — oceń."""
+        if self._cond is None or not self._running:
+            return
+        step, _ = self._cond
+        if step.pump != pid:
+            return
+        if self._cond_met(step, st):
+            self._leave_condition()
+            self._advance()
+
+    @staticmethod
+    def _cond_met(step: ConditionStep, st: PumpStatus) -> bool:
+        match step.cond:
+            case CondCmd.STOPPED:
+                return st.running is False
+            case CondCmd.RUNNING:
+                return st.running is True
+            case CondCmd.ALARM:
+                return st.alarm is not None
+            case CondCmd.DISPENSED_GE:
+                if st.dispensed is None:
+                    return False
+                target = to_ml(float(step.args["value"]),
+                               step.args.get("unit"))
+                have = to_ml(st.dispensed, st.dispensed_unit)
+                return have >= target
+        return False
+
+    def _on_cond_timeout(self) -> None:
+        step, _ = self._cond if self._cond else (None, 0.0)
+        self._leave_condition()
+        if not self._running or step is None:
+            return
+        if step.on_timeout == "continue":
+            self._advance()  # polityka: jedź dalej
+        else:
+            self._running = False
+            self.error.emit(
+                f"warunek '{describe(step)}' niespełniony po "
+                f"{step.timeout_s:g} s")
+            self.stopped.emit()
+
+class _CondRelay(QObject):
+    """Przekaźnik statusu jednej pompy do runnera (GUI-wątek)."""
+
+    def __init__(self, pid: int, runner: "ProcedureRunner"):
+        super().__init__()
+        self._pid = pid
+        self._runner = runner
+
+    def on_status(self, st: PumpStatus) -> None:
+        self._runner._on_pump_status(self._pid, st)
 
 # ---------------------------------------------------------------- testy
 if __name__ == "__main__":
@@ -329,5 +415,91 @@ if __name__ == "__main__":
         CommandStep(ProcCmd.STOP, (1,)),
     ])
     assert wait_for(lambda: finished == [True])
+
+    # 7. bramka STOPPED: czeka na zatrzymanie pompy 1, potem dalej
+    h1.ops.clear();
+    h2.ops.clear()
+    seen.clear();
+    finished.clear()
+    from core.proc.steps import ConditionStep, CondCmd
+
+    r3 = ProcedureRunner(handles)
+    r3.step_changed.connect(lambda i, t, s: seen.append((i, s)))
+    r3.finished.connect(lambda: finished.append(True))
+    r3.error.connect(errors.append)
+    proc4 = [
+        CommandStep(ProcCmd.START, (1,)),
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=5.0),
+        CommandStep(ProcCmd.START, (2,)),
+    ]
+    assert r3.run(proc4)
+    assert r3.is_running() and not r3.is_waiting()
+    # pompa 1 pracuje -> bramka czeka; status pracujący nie zwalnia
+    h1._s.status.emit(PumpStatus(running=True))
+    assert r3.is_running()
+    # dopiero zatrzymanie pompy 1 zwalnia bramkę
+    h1._s.status.emit(PumpStatus(running=False))
+    assert wait_for(lambda: finished == [True])
+    assert h2.ops[-1] == (Op.START, {})  # kontynuacja po bramce
+
+    # 8. timeout error: bramka nie spełniona -> error+stop
+    errors.clear();
+    finished.clear();
+    stopped.clear()
+    r4 = ProcedureRunner(handles)
+    r4.finished.connect(lambda: finished.append(True))
+    r4.stopped.connect(lambda: stopped.append(True))
+    r4.error.connect(errors.append)
+    assert r4.run([
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=0.2),
+    ])
+    assert wait_for(lambda: stopped == [True])
+    assert any("niespełniony" in e for e in errors)
+    assert finished == []  # nie skończył się normalnie
+
+    # 9. timeout continue: polityka jedzie dalej
+    finished.clear();
+    stopped.clear();
+    errors.clear()
+    r5 = ProcedureRunner(handles)
+    r5.finished.connect(lambda: finished.append(True))
+    r5.error.connect(errors.append)
+    assert r5.run([
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=0.2,
+                      on_timeout="continue"),
+        CommandStep(ProcCmd.STOP, (2,)),
+    ])
+    assert wait_for(lambda: finished == [True])
+    assert h2.ops[-1] == (Op.STOP, {})
+
+    # 10. DISPENSED_GE: fizyczna wartość zwalnia bramkę
+    h2.ops.clear();
+    finished.clear()
+    r6 = ProcedureRunner(handles)
+    r6.finished.connect(lambda: finished.append(True))
+    assert r6.run([
+        CommandStep(ProcCmd.START, (2,)),
+        ConditionStep(CondCmd.DISPENSED_GE, 2,
+                      {"value": 1.0, "unit": "mL"}, timeout_s=5.0),
+    ])
+    h2._s.status.emit(PumpStatus(running=True, dispensed=0.5,
+                                 dispensed_unit="mL"))
+    assert r6.is_running()  # 0.5 < 1.0 — czeka
+    h2._s.status.emit(PumpStatus(running=True, dispensed=1500.0,
+                                 dispensed_unit="µL"))
+    assert wait_for(lambda: finished == [True])  # 1500 µL = 1.5 mL >= 1
+
+    # 11. bramka obcej pompy nie zwalnia (pid mismatch)
+    h1.ops.clear();
+    finished.clear()
+    r7 = ProcedureRunner(handles)
+    r7.finished.connect(lambda: finished.append(True))
+    assert r7.run([
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=30.0),
+    ])
+    h2._s.status.emit(PumpStatus(running=False))  # pompa 2 — nie ta
+    assert r7.is_running()
+    r7.stop()
+    assert not r7.is_running()
 
     print("runner: OK")
