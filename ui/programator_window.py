@@ -10,11 +10,13 @@ postęp krok po kroku; zamknięcie okna w biegu -> stop.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget, QFileDialog,
 )
 
 from core.pump.base import PumpCapabilities, PumpStatus
@@ -23,6 +25,10 @@ from core.proc.runner import ProcedureRunner
 from core.proc.steps import (
     CommandStep, CommandSpec, ConditionStep, LoopEndStep, LoopStartStep,
     ProcCmd, PROC_COMMANDS, CONDITIONS, describe, CondCmd
+)
+from core.proc.storage import (
+    PROC_DIR, PROC_SUFFIX, ProcStorageError, load_procedure,
+    save_procedure,
 )
 
 _TIME_UNITS = ("s", "min", "h")
@@ -278,6 +284,12 @@ class ProgramatorWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._on_stop)
         run_row.addWidget(self.run_btn)
         run_row.addWidget(self.stop_btn)
+        self.save_btn = QPushButton("💾 Zapisz")
+        self.save_btn.clicked.connect(self._on_save)
+        self.load_btn = QPushButton("📂 Wczytaj")
+        self.load_btn.clicked.connect(self._on_load)
+        run_row.addWidget(self.save_btn)
+        run_row.addWidget(self.load_btn)
         run_row.addStretch()
         root.addLayout(run_row)
 
@@ -376,6 +388,44 @@ class ProgramatorWindow(QMainWindow):
         running = self._runner.is_running()
         self.run_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
+
+    # ------------------------------------------------------ persystencja
+
+    def _on_save(self) -> None:
+        if self._runner.is_running():
+            self.error_label.setText("stop procedury przed zapisem")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Zapisz procedurę", str(PROC_DIR),
+            f"Procedury (*{PROC_SUFFIX});;Wszystkie (*)")
+        if not path:
+            return
+        try:
+            save_procedure(self._steps, path)
+            self.status_label.setText(f"zapisano: {Path(path).name}")
+            self.error_label.setText("")
+        except ProcStorageError as e:
+            self.error_label.setText(str(e))
+
+    def _on_load(self) -> None:
+        if self._runner.is_running():
+            self.error_label.setText("stop procedury przed wczytaniem")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Wczytaj procedurę", str(PROC_DIR),
+            f"Procedury (*{PROC_SUFFIX});;Wszystkie (*)")
+        if not path:
+            return
+        try:
+            steps = load_procedure(path)
+        except ProcStorageError as e:
+            self.error_label.setText(str(e))
+            return
+        self._steps = steps
+        self._refresh_list()
+        self.status_label.setText(
+            f"wczytano: {Path(path).name} ({len(steps)} kroków)")
+        self.error_label.setText("")
 
     def _on_stop(self) -> None:
         self._runner.stop()
@@ -568,5 +618,34 @@ if __name__ == "__main__":
     assert h1b.ops[-1] == (Op.STOP, {})
     assert wb.status_label.text() == "zakończono"
     wb.close()
+
+    # 11. persystencja: round-trip przez przyciskowe API + guard w biegu
+    import tempfile
+    from pathlib import Path
+    from core.proc.storage import save_procedure, load_procedure
+
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "t.proc.json"
+        w._steps = [CommandStep(ProcCmd.START, None),
+                    ConditionStep(CondCmd.STOPPED, 1, timeout_s=15.0)]
+        w._refresh_list()
+        save_procedure(w._steps, f)
+        w._steps = []
+        w._refresh_list()
+        loaded = load_procedure(f)
+        assert len(loaded) == 2
+        assert isinstance(loaded[1], ConditionStep)
+        assert loaded[1].timeout_s == 15.0
+        w._steps = loaded  # kompletacja obiegu: jak _on_load
+        w._refresh_list()
+        assert w.save_btn is not None and w.load_btn is not None
+        w._on_run()  # START + bramka STOPPED (15 s)
+        assert w._runner.is_running()
+        w._on_save()
+        assert "stop procedury" in w.error_label.text()
+        w._on_load()
+        assert "stop procedury" in w.error_label.text()
+        w._on_stop()
+        assert not w._runner.is_running()
 
     print("programator_window: OK")
