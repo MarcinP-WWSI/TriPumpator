@@ -37,6 +37,7 @@ from core.pump.base import (
     BasePumpDriver, Op, PumpCapabilities, PumpStatus, fmt_dispensed,
     fmt_duration, fmt_volume_ml, norm_unit, time_to_seconds,
 )
+from ui.selector_window import JsonSettings
 
 MODE_CONT = "Ciągły"
 MODE_VOL = "Objętość"
@@ -53,18 +54,22 @@ FORCE_HINT = (
     "<b>Szklane strzykawki = NISKA wartość!</b> <br>"
 )
 
+_CTRL_W = 110   # spin/combo: czytelne, ale nie rozciągnięte
+_UNIT_W = 86    # wąskie combo jednostek
 
 class PumpWindow(QMainWindow):
     closed = pyqtSignal()
 
     def __init__(self, pump_id: int, handle,
                  confirm_purge: Callable[[], bool] | None = None,
-                 parent=None):
+                 settings=None, parent=None):
         super().__init__(parent)
         self._handle = handle
         self._syncing = False
-        self._running = False                 # dla locków parametrów
+        self._running = False
         self._confirm_purge = confirm_purge or self._default_confirm_purge
+        self._settings = settings if settings is not None \
+            else JsonSettings()
         caps = handle.capabilities
 
         # szacunek dozowania: per kierunek, w mL
@@ -77,13 +82,31 @@ class PumpWindow(QMainWindow):
         self._build_ui(caps)
         self._attach()
 
+        self.setMinimumWidth(480)
+
+        collapsed = bool(self._settings.value(
+            "pump_settings_collapsed", False))
+        self.collapse_btn.blockSignals(True)
+        self.collapse_btn.setChecked(collapsed)
+        self.collapse_btn.blockSignals(False)
+        self._apply_collapse(collapsed)
+
     # ---------------------------------------------------------------- UI
 
     def _build_ui(self, caps: PumpCapabilities) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
 
+        # nagłówek: zwijanie | link | model | wersja fw
         head = QHBoxLayout()
+        self.collapse_btn = QPushButton("⚙ Ustawienia ▲")
+        self.collapse_btn.setCheckable(True)
+        self.collapse_btn.setToolTip(
+            "Zwiń/rozwiń ustawienia (spiny i przyciski Ustaw).\n"
+            "Zwinięte = czysty podgląd: status, dozowanie, stery.")
+        self.collapse_btn.toggled.connect(self._on_collapse)
+        head.addWidget(self.collapse_btn)
+
         self.link_label = QLabel("OFFLINE")
         self.link_label.setStyleSheet("font-weight: bold;")
         self.model_label = QLabel(caps.name)
@@ -102,7 +125,9 @@ class PumpWindow(QMainWindow):
         root.addWidget(self.alarm_banner)
 
         # siatka: 0=nazwa | 1..3=wejścia | 4=przycisk | 5=Aktualnie
+        self.settings_box = QWidget()
         grid = QGridLayout()
+        self.settings_box.setLayout(grid)
         grid.setColumnStretch(5, 1)
         row = 0
 
@@ -232,7 +257,7 @@ class PumpWindow(QMainWindow):
             row += 1
 
         root.addLayout(grid)
-
+        root.addWidget(self.settings_box)
         # sterowanie biegiem
         run = QHBoxLayout()
         self.start_btn = QPushButton("Start")
@@ -256,6 +281,14 @@ class PumpWindow(QMainWindow):
         root.addWidget(self.error_label)
 
         self.setCentralWidget(central)
+        # szerokości: jawne, spójne — okno węższe
+        for w in self.findChildren(QDoubleSpinBox):
+            w.setMaximumWidth(_CTRL_W)
+        for w in self.findChildren(QComboBox):
+            w.setMaximumWidth(_CTRL_W)
+        self.rate_unit.setMaximumWidth(_UNIT_W)
+        if self.target_unit is not None:
+            self.target_unit.setMaximumWidth(_UNIT_W)
 
     # ------------------------------------------------------------ sygnały
 
@@ -451,6 +484,18 @@ class PumpWindow(QMainWindow):
         self.link_label.setText("OFFLINE")
         self.link_label.setStyleSheet(
             "font-weight: bold; color: #b71c1c;")
+
+    # ------------------------------------------------------------ zwijanie
+
+    def _on_collapse(self, checked: bool) -> None:
+        self._apply_collapse(checked)
+        self._settings.setValue("pump_settings_collapsed", checked)
+
+    def _apply_collapse(self, collapsed: bool) -> None:
+        """Tryb kompaktowy: chowamy ustawianie, zostaje monitoring."""
+        self.settings_box.setVisible(not collapsed)
+        self.collapse_btn.setText(
+            "⚙ Ustawienia ▼" if collapsed else "⚙ Ustawienia ▲")
 
     # ------------------------------------------------------------ pomocnicze
 
@@ -715,5 +760,45 @@ if __name__ == "__main__":
     w_lock.closed.connect(lambda: got_close.append(True))
     w_lock.close()
     assert got_close == [True]
+
+
+    # 19. zwijanie ustawień: stan, persystencja (seam), stery żyją,
+    #     szerokości kontrolne
+    class FakeSt:
+        def __init__(self):   self.d = {}
+
+        def value(self, k, default=None): return self.d.get(k, default)
+
+        def setValue(self, k, v):         self.d[k] = v
+
+
+    st_c = FakeSt()
+    h_c = FakeHandle(DemoDriver.capabilities)
+    w_c = PumpWindow(1, h_c, confirm_purge=lambda: True, settings=st_c)
+    assert w_c.settings_box.isVisibleTo(w_c)  # start: rozwinięte
+    assert st_c.d == {}  # nic nie zapisano
+
+    w_c.collapse_btn.setChecked(True)  # zwiń (zapis!)
+    assert not w_c.settings_box.isVisibleTo(w_c)
+    assert st_c.d["pump_settings_collapsed"] is True
+    assert "▼" in w_c.collapse_btn.text()
+
+    # nowa instancja na tym samym settings: startuje zwinięta
+    h_c2 = FakeHandle(DemoDriver.capabilities)
+    w_c2 = PumpWindow(2, h_c2, settings=st_c)
+    assert not w_c2.settings_box.isVisibleTo(w_c2)
+    assert st_c.d == {"pump_settings_collapsed": True}  # restor nie pisze
+
+    # rozwiń: stery działały cały czas (poza settings_box)
+    w_c2.collapse_btn.setChecked(False)
+    assert w_c2.settings_box.isVisibleTo(w_c2)
+    assert st_c.d["pump_settings_collapsed"] is False
+    w_c2.start_btn.click()
+    assert h_c2.ops[-1] == (Op.START, {})
+
+    # szerokości: spiny/combo ograniczone
+    assert w_c2.rate_spin.maximumWidth() <= _CTRL_W
+    assert w_c2.rate_unit.maximumWidth() <= _UNIT_W
+    assert w_c2.dia_spin.maximumWidth() <= _CTRL_W
 
     print("device_window: OK")
