@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "kind": "command",
+      "cmd": "SET_DIAMETER",
+      "pumps": null,
+      "args": {
+        "mm": 1.0
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "SET_FORCE",
+      "pumps": null,
+      "args": {
+        "percent": 1.0
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "SET_DIRECTION",
+      "pumps": null,
+      "args": {
+        "direction": "INF"
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "SET_RATE",
+      "pumps": null,
+      "args": {
+        "value": 1.0,
+        "unit": "mL/h"
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "SET_TARGET_VOLUME",
+      "pumps": null,
+      "args": {
+        "volume": 1.0,
+        "unit": "mL"
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "START",
+      "pumps": [
+        1
+      ],
+      "args": {}
+    },
+    {
+      "kind": "condition",
+      "cond": "RUNNING",
+      "pump": 1,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    },
+    {
+      "kind": "command",
+      "cmd": "START",
+      "pumps": [
+        2
+      ],
+      "args": {}
+    },
+    {
+      "kind": "condition",
+      "cond": "RUNNING",
+      "pump": 2,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    },
+    {
+      "kind": "command",
+      "cmd": "START",
+      "pumps": [
+        3
+      ],
+      "args": {}
+    },
+    {
+      "kind": "condition",
+      "cond": "RUNNING",
+      "pump": 3,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    },
+    {
+      "kind": "command",
+      "cmd": "SET_RATE",
+      "pumps": null,
+      "args": {
+        "value": 10.0,
+        "unit": "mL/h"
+      }
+    },
+    {
+      "kind": "condition",
+      "cond": "DISPENSED_GE",
+      "pump": 1,
+      "args": {
+        "value": 1.0,
+        "unit": "mL"
+      },
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    }
+  ]
+}

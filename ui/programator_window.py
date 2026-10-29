@@ -45,13 +45,18 @@ def _spin(lo=0.0, hi=99999.0, dec=3, val=1.0) -> QDoubleSpinBox:
 class _StepDialog(QDialog):
     """Edycja jednego CommandStep (lub pętli). OK = walidacja z caps."""
 
-    def __init__(self, step, pids: list[int], caps: dict[int, PumpCapabilities],
-                 parent=None):
+    def __init__(self, step, pids: list[int],
+                 caps: dict[int, PumpCapabilities], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Krok")
         self._step = step
         self._pids = pids
         self._caps = caps
+        self.count_spin = None
+        self.extra_box = None
+        self._fields: dict[str, QWidget] = {}
+        self._pump_checks: dict[int, QCheckBox] = {}
+        self._all_box = None
         lay = QVBoxLayout(self)
 
         if isinstance(step, LoopStartStep):
@@ -647,5 +652,36 @@ if __name__ == "__main__":
         assert "stop procedury" in w.error_label.text()
         w._on_stop()
         assert not w._runner.is_running()
+
+        # 12. dialogi bez exec(): result_step dla WSZYSTKICH typów kroków
+        #     (regresja crasha 0xC0000409 — zapomniany count_spin)
+        caps_map = {p: h.capabilities for p, h in handles.items()}
+        pids = list(handles)
+
+        d_loop = _StepDialog(LoopStartStep(2), pids, caps_map)
+        d_loop.count_spin.setValue(7)
+        assert d_loop.result_step() == LoopStartStep(7)
+
+        d_cmd = _StepDialog(CommandStep(ProcCmd.SET_RATE, (1,)), pids,
+                            caps_map)
+        d_cmd._fields["value"].setValue(120.0)
+        d_cmd._fields["unit"].setCurrentText("µL/min")
+        st = d_cmd.result_step()
+        assert isinstance(st, CommandStep)
+        assert st.args["value"] == 120.0 and st.args["unit"] == "µL/min"
+        assert st.pumps == (1,)
+
+        d_cond = _StepDialog(ConditionStep(CondCmd.STOPPED, 1), pids,
+                             caps_map)
+        d_cond.cond_combo.setCurrentText("dozowane >=")
+        d_cond.cond_value_spin.setValue(2.5)
+        d_cond.cond_unit_combo.setCurrentText("mL")
+        d_cond.cond_timeout_spin.setValue(30.0)
+        d_cond.cond_on_timeout_combo.setCurrentText("continue")
+        st = d_cond.result_step()
+        assert isinstance(st, ConditionStep)
+        assert st.cond is CondCmd.DISPENSED_GE and st.pump == 1
+        assert st.args == {"value": 2.5, "unit": "mL"}
+        assert st.timeout_s == 30.0 and st.on_timeout == "continue"
 
     print("programator_window: OK")
