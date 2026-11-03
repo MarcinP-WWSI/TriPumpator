@@ -1,27 +1,18 @@
 {
   "rows": [
     [
-      null,
-      "Pompa demo (symulator)",
+      "COM7",
+      "Harvard Pump 11 Elite",
       {
         "diameter": 26.0,
         "force": 50.0
       }
     ],
     [
-      null,
-      "Pompa demo (symulator)",
+      "COM10",
+      "WPI AL-1000",
       {
-        "diameter": 25.0,
-        "force": 51.0
-      }
-    ],
-    [
-      null,
-      "Pompa demo (symulator)",
-      {
-        "diameter": 27.0,
-        "force": 50.0
+        "diameter": 25.0
       }
     ]
   ],

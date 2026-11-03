@@ -27,10 +27,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from PyQt6.QtCore import pyqtSignal, QTimer
+from PyQt6.QtCore import pyqtSignal, QTimer, Qt
 from PyQt6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget, QLayout,
 )
 
 from core.pump.base import (
@@ -54,8 +54,30 @@ FORCE_HINT = (
     "<b>Szklane strzykawki = NISKA wartość!</b> <br>"
 )
 
-_CTRL_W = 110   # spin/combo: czytelne, ale nie rozciągnięte
-_UNIT_W = 86    # wąskie combo jednostek
+ALARM_STYLE = (
+    "background-color: #c62828; color: white; padding: 4px;"
+    "font-weight: bold;")
+BANNER_IDLE_STYLE = (
+    "background-color: transparent; color: transparent; padding: 4px;"
+    "font-weight: bold;")
+
+
+_W_LABEL = 100
+_W_SPIN = 90
+_W_UNIT = 70
+_W_BTN = 74
+_W_CUR = 110
+_GAP = 6
+_MARGIN = 32       # marginesy root + ramka okna, całość slacku
+
+
+
+def _fx(w: QWidget, width: int) -> QWidget:
+    """Stała szerokość kontrolki — sizeHint okna staje się czystą
+    funkcją stanu (rozwinięty/zwinięty), niezależną od tekstów,
+    wartości spinów i statusów. To zabija całą klasę 'okna-rośnięcia'."""
+    w.setFixedWidth(width)
+    return w
 
 class PumpWindow(QMainWindow):
     closed = pyqtSignal()
@@ -82,9 +104,8 @@ class PumpWindow(QMainWindow):
         self._build_ui(caps)
         self._attach()
 
+        self._measure_and_store()
 
-
-        # rozmiar STAŁY (nic nie rozciągasz), stan zwinięcia z ustawień
         collapsed = bool(self._settings.value(
             "pump_settings_collapsed", False))
         self.collapse_btn.blockSignals(True)
@@ -98,18 +119,16 @@ class PumpWindow(QMainWindow):
     def _build_ui(self, caps: PumpCapabilities) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
-        # nagłówek: link | model | ... | wersja | [◀▶] na prawym brzegu
         head = QHBoxLayout()
         self.link_label = QLabel("OFFLINE")
         self.link_label.setStyleSheet("font-weight: bold;")
+        _fx(self.link_label, 64)  # ONLINE/OFFLINE: stałe
         self.model_label = QLabel(caps.name)
         self.version_label = QLabel("")
-        self.version_label.setMinimumWidth(70)
-        head.addWidget(self.link_label)
-        head.addWidget(self.model_label)
-        head.addStretch()
-        head.addWidget(self.version_label)
+        _fx(self.version_label, 70)
         self.collapse_btn = QPushButton("▶")
         self.collapse_btn.setCheckable(True)
         self.collapse_btn.setFixedWidth(34)
@@ -117,23 +136,27 @@ class PumpWindow(QMainWindow):
             "Zwiń/rozwiń pola ustawiania.\n"
             "Aktualne wartości, dozowanie i stery zostają widoczne.")
         self.collapse_btn.toggled.connect(self._on_collapse)
+        head.addWidget(self.link_label)
+        head.addWidget(self.model_label)
+        head.addStretch()
+        head.addWidget(self.version_label)
         head.addWidget(self.collapse_btn)
         root.addLayout(head)
 
-
+        # banner: STAŁA szerokość — zmiana tekstu/alarmu nie rusza hinta
         self.alarm_banner = QLabel(" ")
-        self.alarm_banner.setStyleSheet(
-            "background-color: #c62828; color: white; padding: 4px;"
-            "font-weight: bold;")
+        self.alarm_banner.setStyleSheet(BANNER_IDLE_STYLE)
+        _fx(self.alarm_banner, 240)
         root.addWidget(self.alarm_banner)
 
-        # --- ustawianie (zwijane): WEJŚCIA + kolumna Aktualnie ---
-        # zwijanie chowa wyłącznie widgety z self._inputs; etykiety
-        # wierszy i wartości "Aktualnie" zostają zawsze
         self.settings_box = QWidget()
         grid = QGridLayout()
         self.settings_box.setLayout(grid)
-        grid.setColumnStretch(5, 1)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+        # UWAGA: ŻADNEGO setColumnStretch — z podjętymi szerokościami
+        # stretch tylko dodawałby martwą przestrzeń i niestabilność
         self._inputs: list[QWidget] = []
         row = 0
 
@@ -143,6 +166,7 @@ class PumpWindow(QMainWindow):
             grid.addWidget(QLabel("Kierunek:"), row, 0)
             self.dir_combo = QComboBox()
             self.dir_combo.addItems(caps.directions)
+            _fx(self.dir_combo, 90)
             self.dir_combo.currentTextChanged.connect(self._on_direction)
             self._inputs.append(self.dir_combo)
             self.dir_cur = QLabel("—")
@@ -156,9 +180,12 @@ class PumpWindow(QMainWindow):
         hi = caps.rate_max if caps.rate_max != float("inf") else 99999.0
         self.rate_spin.setRange(lo, hi)
         self.rate_spin.setDecimals(3)
+        _fx(self.rate_spin, 100)
         self.rate_unit = QComboBox()
         self.rate_unit.addItems(caps.rate_units)
+        _fx(self.rate_unit, 90)
         self.set_rate_btn = QPushButton("Ustaw")
+        _fx(self.set_rate_btn, 84)
         self.set_rate_btn.clicked.connect(self._on_set_rate)
         self._inputs += [self.rate_spin, self.rate_unit,
                          self.set_rate_btn]
@@ -182,13 +209,17 @@ class PumpWindow(QMainWindow):
             if caps.target_time:
                 modes.append(MODE_TIME)
             self.target_mode.addItems(modes)
+            _fx(self.target_mode, 100)
             self.target_mode.currentTextChanged.connect(
                 self._on_target_mode)
             self.target_spin = QDoubleSpinBox()
             self.target_spin.setRange(0.0, 99999.0)
             self.target_spin.setDecimals(3)
+            _fx(self.target_spin, 100)
             self.target_unit = QComboBox()
+            _fx(self.target_unit, 90)
             self.set_target_btn = QPushButton("Ustaw")
+            _fx(self.set_target_btn, 84)
             self.set_target_btn.clicked.connect(self._on_set_target)
             self._inputs += [self.target_mode, self.target_spin,
                              self.target_unit, self.set_target_btn]
@@ -210,7 +241,9 @@ class PumpWindow(QMainWindow):
             self.dia_spin.setRange(dlo, dhi)
             self.dia_spin.setDecimals(2)
             self.dia_spin.setValue(dhi / 2.0)
+            _fx(self.dia_spin, _W_SPIN)
             self.set_dia_btn = QPushButton("Ustaw")
+            _fx(self.set_dia_btn, _W_BTN)
             self.set_dia_btn.clicked.connect(self._on_set_diameter)
             self._inputs += [self.dia_spin, self.set_dia_btn]
             self.dia_cur = QLabel("—")
@@ -228,7 +261,9 @@ class PumpWindow(QMainWindow):
             self.force_spin.setRange(flo, fhi)
             self.force_spin.setDecimals(0)
             self.force_spin.setValue(50)
+            _fx(self.force_spin, _W_SPIN)
             self.set_force_btn = QPushButton("Ustaw")
+            _fx(self.set_force_btn, _W_BTN)
             self.set_force_btn.clicked.connect(self._on_set_force)
             self._inputs += [self.force_spin, self.set_force_btn]
             self.force_cur = QLabel("—")
@@ -240,13 +275,35 @@ class PumpWindow(QMainWindow):
 
         root.addWidget(self.settings_box)
 
-        # --- dozowanie: MONITORING, poza zwijanym boksem, zawsze żyje ---
+        # Aktualnie: STAŁE szerokości z wzorców — fluktuacje tekstów
+        # nie mają wpływu na geometrię (było: setMinimumWidth = sufit
+        # nie istniał, dłuższy tekst rozdymał hint)
+        def _fw(lbl: QLabel, pattern: str) -> None:
+            fm = lbl.fontMetrics()
+            text = fm.elidedText(pattern, Qt.TextElideMode.ElideRight,
+                                 fm.horizontalAdvance(pattern))
+            lbl.setFixedWidth(fm.horizontalAdvance(pattern) + 8)
+
+        if self.dir_cur is not None:
+            _fw(self.dir_cur, "WDR")
+        if self.rate_cur is not None:
+            _fw(self.rate_cur, "99999.99 µL/min")
+        if self.target_cur is not None:
+            _fw(self.target_cur, "9999 µL | 99:59:59")
+        if self.dia_cur is not None:
+            _fw(self.dia_cur, "Ø50.00 mm")
+        if self.force_cur is not None:
+            _fw(self.force_cur, "100 %")
+
+        # dozowanie — monitoring, poza zwijanym boksem
         self.disp_label: QLabel | None = None
         self.est_label: QLabel | None = None
         self.disp_hdr: QLabel | None = None
         self.est_hdr: QLabel | None = None
         if caps.dispensed_query:
             disp = QGridLayout()
+            disp.setContentsMargins(0, 0, 0, 0)
+            disp.setHorizontalSpacing(6)
             disp.addWidget(QLabel("Dozowane:"), 0, 0)
             self.disp_hdr = QLabel("z pompy")
             self.est_hdr = QLabel("szacunek")
@@ -263,7 +320,10 @@ class PumpWindow(QMainWindow):
                 "Nie zna prędkości purge (zaniża); rozjazd z licznikiem\n"
                 "pompy = stall / purge / zgubiona komenda.")
             self.clear_btn = QPushButton("Zeruj")
+            _fx(self.clear_btn, _W_BTN)
             self.clear_btn.clicked.connect(self._on_clear)
+            _fx(self.disp_label, 96)
+            _fx(self.est_label, 96)
             disp.addWidget(self.disp_label, 1, 1)
             disp.addWidget(self.est_label, 1, 2)
             disp.addWidget(self.clear_btn, 1, 4)
@@ -271,7 +331,6 @@ class PumpWindow(QMainWindow):
             wrap.setLayout(disp)
             root.addWidget(wrap)
 
-        # --- stery biegu ---
         run = QHBoxLayout()
         self.start_btn = QPushButton("Start")
         self.stop_btn = QPushButton("Stop")
@@ -283,8 +342,7 @@ class PumpWindow(QMainWindow):
         self.purge_btn: QPushButton | None = None
         if caps.purge:
             self.purge_btn = QPushButton("Purge")
-            self.purge_btn.setToolTip(
-                "Pełna prędkość! Stop kończy purge.")
+            self.purge_btn.setToolTip("Pełna prędkość! Stop kończy purge.")
             self.purge_btn.clicked.connect(self._on_purge)
             run.addWidget(self.purge_btn)
         run.addStretch()
@@ -292,26 +350,11 @@ class PumpWindow(QMainWindow):
 
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #e65100;")
+        self.error_label.setWordWrap(True)
+        _fx(self.error_label, 340)
+        fm = self.error_label.fontMetrics()
+        self.error_label.setFixedHeight(fm.height() * 2 + 6)
         root.addWidget(self.error_label)
-
-        # min-szerokości wartości: mierzone raz, najdłuższymi realnymi
-        # wzorcami — fluktuacje tekstów (liczniki!) nie ruszają okna
-        def _lock_width(lbl: QLabel, pattern: str) -> None:
-            fm = lbl.fontMetrics()
-            lbl.setMinimumWidth(fm.horizontalAdvance(pattern) + 6)
-        if self.rate_cur is not None:
-            _lock_width(self.rate_cur, "99999.999 µL/min")
-        if self.target_cur is not None:
-            _lock_width(self.target_cur, "9999 µL | 99:59:59")
-        if self.dir_cur is not None:
-            _lock_width(self.dir_cur, "WDR")
-        if self.dia_cur is not None:
-            _lock_width(self.dia_cur, "Ø50.00 mm")
-        if self.force_cur is not None:
-            _lock_width(self.force_cur, "100 %")
-        if self.disp_label is not None:
-            _lock_width(self.disp_label, "9999.999 mL")
-            _lock_width(self.est_label, "9999.999 mL")
 
         self.setCentralWidget(central)
 
@@ -425,9 +468,10 @@ class PumpWindow(QMainWindow):
 
             if st.alarm:
                 self.alarm_banner.setText(f"⚠ ALARM: {st.alarm}")
-                self.alarm_banner.show()
+                self.alarm_banner.setStyleSheet(ALARM_STYLE)
             else:
-                self.alarm_banner.hide()
+                self.alarm_banner.setText(" ")
+                self.alarm_banner.setStyleSheet(BANNER_IDLE_STYLE)
 
             self.start_btn.setEnabled(not st.running)
             self.stop_btn.setEnabled(bool(st.running))
@@ -520,26 +564,65 @@ class PumpWindow(QMainWindow):
         self._apply_collapse(checked)
         self._settings.setValue("pump_settings_collapsed", checked)
 
+
+
+    # ------------------------------------------------------------ zwijanie
+
+
+    # ale kolumna przyjmuje max — stały sufit)
+
+    def _compute_size(self, collapsed: bool) -> tuple[int, int]:
+        """Rozmiar WYŁĄCZNIE z własnych stałych. Szerokość definiuje
+        siatka ustawień w danym stanie (dozowanie/stery są węższe i
+        mają się zmieścić). Expanded: kolumny 0..5 = LABEL+SPIN+UNIT+
+        [UNIT]+BTN+CUR — SPIN/UNIT płacą raz (grid = max per kolumna).
+        Collapsed: LABEL+CUR. Zero hintów Qt (15 rund dowodów)."""
+        fm = self.model_label.fontMetrics()
+        line = fm.height()
+        btn_h = line + 14
+
+        has_target = self.target_mode is not None
+        if collapsed:
+            width = _W_LABEL + _GAP + _W_CUR + _MARGIN
+        else:
+            width = (_W_LABEL + _GAP + _W_SPIN + _GAP + _W_UNIT + _GAP
+                     + (_W_UNIT + _GAP if has_target else 0)
+                     + _W_BTN + _GAP + _W_CUR + _MARGIN)
+
+        rows = 1 + int(has_target) + int(self.dia_spin is not None) \
+               + int(self.force_spin is not None) \
+               + int(self.dir_combo is not None)
+        row_h = (line + 4) if collapsed else (btn_h + 4)
+        h = 16 + (line + 6) + (line + 14 + 6) + rows * row_h + 6
+        if self.disp_label is not None:
+            h += (line + 2) + (line + 4) + 6
+        h += btn_h + 6 + (line * 2 + 6) + 6 + 6
+        return (width, h)
+
+    def _measure_and_store(self) -> None:
+        for w in self._inputs:
+            w.setVisible(False)
+        self._size_collapsed = self._compute_size(collapsed=True)
+        for w in self._inputs:
+            w.setVisible(True)
+        self._size_expanded = self._compute_size(collapsed=False)
+
     def _apply_collapse(self, collapsed: bool) -> None:
         for w in self._inputs:
             w.setVisible(not collapsed)
+        # "Zeruj" to operacja, nie monitoring — w trybie podglądu
+        # ustępuje miejsca kolumnom dozowania (disp + est)
+        if self.clear_btn is not None:
+            self.clear_btn.setVisible(not collapsed)
+        # est_label ZAWSZE widoczny (cofnięcie chowania — monitoring)
+        if self.est_label is not None:
+            self.est_label.setVisible(True)
         self.collapse_btn.setText("◀" if collapsed else "▶")
-        # pomiar w NASTĘPNEJ iteracji pętli zdarzeń: layout musi się
-        # najpierw przeliczyć na czysto; mierzenie w tej samej chwili
-        # czyta kumulowaną geometrię i okno rośnie bez powrotu
-        QTimer.singleShot(0, self._retune_size)
-
-    def _retune_size(self) -> None:
-        """Zamroź okno na czystym sizeHint bieżącego trybu.
-
-        KLUCZ: sizeHint liczony PO pełnym przeliczeniu layoutu, które
-        wymuszamy przez activate() na ORAZ wyczyszczeniu starej
-        geometrii — w przeciwnym razie hint kumuluje historię
-        (okno 'rosnące w gigant' przy każdym rozwinięciu).
-        """
-        self.centralWidget().adjustSize()          # dzieci przelicz
-        hint = self.centralWidget().sizeHint()
-        self.setFixedSize(hint.width() + 40, hint.height() + 12)
+        c = self.centralWidget()
+        c.adjustSize()
+        c.layout().activate()
+        self.setFixedSize(*(self._size_collapsed if collapsed
+                            else self._size_expanded))
 
 
     # ------------------------------------------------------------ pomocnicze
@@ -554,6 +637,7 @@ class PumpWindow(QMainWindow):
 
     def _show_error(self, msg: str) -> None:
         self.error_label.setText(msg)
+        self.error_label.setToolTip(msg)   # pełna treść; label ma 2 linie
 
     def closeEvent(self, event) -> None:
         self.closed.emit()
@@ -659,11 +743,12 @@ if __name__ == "__main__":
     assert w.target_spin.isEnabled()  # tryb "Objętość" + postój -> OK
     assert w.set_target_btn.isEnabled()
 
-    # 5. alarm
+    # 5. alarm: wiersz zarezerwowany — tekst/styl się zmieniają, geometria nie
     h.status.emit(PumpStatus(running=False, alarm="S"))
     assert "ALARM" in w.alarm_banner.text()
     h.status.emit(PumpStatus(running=False))
-    assert w.alarm_banner.isHidden()
+    assert w.alarm_banner.text() == " "  # idle = pusty, NIE ukryty
+    assert w.alarm_banner.isVisibleTo(w)
 
     # 6. kierunek: klik -> submit; sync -> cisza
     w.dir_combo.setCurrentText("WDR")
@@ -807,8 +892,8 @@ if __name__ == "__main__":
     assert got_close == [True]
 
 
-    # 19. zwijanie: chowają się WEJŚCIA; Aktualnie/dozowanie/stery żyją;
-    #     rozmiar stały; persystencja przez seam; kierunek w aktualnych
+    # 19. DETERMINIZM ROZMIARÓW — porządek MA znaczenie:
+    #     size_c mierzone ZANIM cokolwiek togglujemy
     class FakeSt:
         def __init__(self):   self.d = {}
 
@@ -817,58 +902,106 @@ if __name__ == "__main__":
         def setValue(self, k, v):         self.d[k] = v
 
 
-    st_c = FakeSt()
-    h_c = FakeHandle(DemoDriver.capabilities)
-    w_c = PumpWindow(1, h_c, confirm_purge=lambda: True, settings=st_c)
+    st_e, st_c = FakeSt(), FakeSt()
+    st_c.d["pump_settings_collapsed"] = True
 
-    app.processEvents()  # singleShot: freeze rozwiniętego
-    assert w_c.rate_spin.isVisibleTo(w_c)  # start: rozwinięte
-    assert w_c.dir_cur is not None
-    assert w_c.collapse_btn.text() == "▶"
-    assert w_c.maximumWidth() == w_c.minimumWidth()  # STAŁE (po freeze)
-    assert w_c.maximumHeight() == w_c.minimumHeight()
-    assert st_c.d == {}  # restor nie pisze
-
-    w_c.collapse_btn.setChecked(True)  # zwiń
-    assert not w_c.rate_spin.isVisibleTo(w_c)
-    assert not w_c.dir_combo.isVisibleTo(w_c)
-    assert w_c.rate_cur.isVisibleTo(w_c)  # Aktualnie żyje!
-    assert w_c.dir_cur.isVisibleTo(w_c)
-    assert w_c.disp_label.isVisibleTo(w_c)  # dozowanie żyje
-    assert w_c.collapse_btn.text() == "◀"
-    assert st_c.d["pump_settings_collapsed"] is True
-
-    w_c.start_btn.click()  # stery w zwiniętym
-    assert h_c.ops[-1] == (Op.START, {})
-
-    h_c.status.emit(PumpStatus(running=True, direction="WDR",
-                               rate=60.0, rate_unit="mL/h"))
-    assert w_c.dir_cur.text() == "WDR"  # kierunek z pompy
-
-    w_c2 = PumpWindow(2, FakeHandle(DemoDriver.capabilities),
-                      settings=st_c)  # startuje zwinięta
-    assert not w_c2.rate_spin.isVisibleTo(w_c2)
-    assert w_c2.rate_cur.isVisibleTo(w_c2)
-    w_c2.collapse_btn.setChecked(False)  # rozwiń
-    assert w_c2.rate_spin.isVisibleTo(w_c2)
-    assert st_c.d["pump_settings_collapsed"] is False
-
-    # 19b. rozmiary per tryb są STABILNE i odwracalne (bez 'ghost
-    #      growth'): mierzymy przez processEvents po singleShot
-    app.processEvents()  # singleShot _retune_size
-    wide = w_c.width();
-    tall = w_c.height()
-    w_c.collapse_btn.setChecked(True)  # zwiń
-    app.processEvents()  # freeze zwiniętego
-    small_w = w_c.width();
-    small_h = w_c.height()
-    assert small_w <= wide  # zwinięte nie szersze
-    w_c.collapse_btn.setChecked(False)  # rozwiń z powrotem
+    w_e1 = PumpWindow(11, FakeHandle(DemoDriver.capabilities),
+                      settings=st_e)
+    w_e2 = PumpWindow(12, FakeHandle(DemoDriver.capabilities),
+                      settings=st_e)
+    w_k1 = PumpWindow(13, FakeHandle(DemoDriver.capabilities),
+                      settings=st_c)
+    w_k2 = PumpWindow(14, FakeHandle(DemoDriver.capabilities),
+                      settings=st_c)
     app.processEvents()
-    assert (w_c.width(), w_c.height()) == (wide, tall)  # identycznie!
-    # druga runda zwijania: ten sam rozmiar zwiniętego (nie kumuluje)
-    w_c.collapse_btn.setChecked(True)
+
+    print(f"STORED: expanded={w_e1._size_expanded} "
+          f"collapsed={w_e1._size_collapsed}")  # zdrowie _measure_and_store
+
+    size_e = (w_e1.width(), w_e1.height())
+    assert (w_e2.width(), w_e2.height()) == size_e, \
+        f"dwa rozwinięte: {(w_e2.width(), w_e2.height())} != {size_e}"
+
+    size_c = (w_k1.width(), w_k1.height())  # DOPIERO: przed togglami
+    assert (w_k2.width(), w_k2.height()) == size_c, \
+        f"dwa zwinięte: {(w_k2.width(), w_k2.height())} != {size_c}"
+    assert size_c[0] <= size_e[0] and size_c[1] < size_e[1], \
+        f"zwinięte {size_c} nie mniejsze od rozwiniętego {size_e}"
+
+    # toggle w obie strony — wraca co do wymiaru
+    w_k1.collapse_btn.setChecked(False)
     app.processEvents()
-    assert (w_c.width(), w_c.height()) == (small_w, small_h)
+    assert (w_k1.width(), w_k1.height()) == size_e, \
+        f"rozwinięcie po togglu {(w_k1.width(), w_k1.height())} != {size_e}"
+    w_k1.collapse_btn.setChecked(True)
+    app.processEvents()
+    assert (w_k1.width(), w_k1.height()) == size_c, \
+        f"zwinięcie po togglu {(w_k1.width(), w_k1.height())} != {size_c}"
+    w_k1.collapse_btn.setChecked(False)
+    app.processEvents()
+    assert (w_k1.width(), w_k1.height()) == size_e, "runda 2: rozwinięcie"
+
+
+    def _dbg(win, tag):
+        lay = win.centralWidget().layout()
+        items = " ".join(
+            f"{i}:{lay.itemAt(i).sizeHint().width()}x"
+            f"{lay.itemAt(i).sizeHint().height()}"
+            for i in range(lay.count()))
+        print(f"[{tag}] win={win.width()}x{win.height()} items=[{items}]")
+
+
+    _dbg(w_e1, "E1 urodzona rozwinięta")
+    _dbg(w_k1, "K1 po togglach (rozwinięta)")
+
+    # statusy/długie teksty nie ruszają geometrii
+    w_e1._handle.status.emit(PumpStatus(
+        running=True, rate=99999.999, rate_unit="µL/min",
+        direction="WDR", dispensed=1234.567, dispensed_unit="mL"))
+    app.processEvents()
+    assert (w_e1.width(), w_e1.height()) == size_e, "status ruszył rozmiar"
+    assert w_e1.alarm_banner.isVisibleTo(w_e1)
+
+    # 19d. persystencja zwinięcia — SAMOWYSTARCZALNY blok: świeży
+    #      słownik, JEDNO okno, JEDNO okno-restor, asercje po każdej
+    #      akcji (nie tylko na końcu!)
+    st_p = FakeSt()
+    w_p = PumpWindow(15, FakeHandle(DemoDriver.capabilities),
+                     settings=st_p)
+    app.processEvents()
+    assert st_p.d == {}  # konstrukcja nie pisze
+
+    w_p.collapse_btn.setChecked(True)  # zwiń -> zapis
+    assert st_p.d == {"pump_settings_collapsed": True}
+    assert not w_p.rate_spin.isVisibleTo(w_p)
+    assert w_p.rate_cur.isVisibleTo(w_p)  # monitoring żyje
+    assert w_p.disp_label.isVisibleTo(w_p)
+
+    w_p.start_btn.click()  # stery poza boxem
+    assert w_p._handle.ops[-1] == (Op.START, {})
+    w_p._handle.status.emit(PumpStatus(running=True, direction="WDR"))
+    assert w_p.dir_cur.text() == "WDR"  # kierunek z pompy
+
+    w_p.collapse_btn.setChecked(False)  # rozwiń -> zapis False
+    assert st_p.d == {"pump_settings_collapsed": False}
+    assert w_p.rate_spin.isVisibleTo(w_p)
+
+    # restor: nowa instancja czyta False -> startuje ROZWINIĘTA
+    # i nie dopisuje nic (blockSignals + brak emisu przy False->False)
+    w_p2 = PumpWindow(16, FakeHandle(DemoDriver.capabilities),
+                      settings=st_p)
+    app.processEvents()
+    assert st_p.d == {"pump_settings_collapsed": False}  # nietknięte
+    assert w_p2.rate_spin.isVisibleTo(w_p2)  # i faktycznie rozwinięta
+
+    # restor w drugą stronę: słownik z True -> startuje zwinięta
+    st_q = FakeSt()
+    st_q.d["pump_settings_collapsed"] = True
+    w_q = PumpWindow(17, FakeHandle(DemoDriver.capabilities),
+                     settings=st_q)
+    app.processEvents()
+    assert st_q.d == {"pump_settings_collapsed": True}  # nietknięte
+    assert not w_q.rate_spin.isVisibleTo(w_q)
+    assert w_q.rate_cur.isVisibleTo(w_q)
 
     print("device_window: OK")
