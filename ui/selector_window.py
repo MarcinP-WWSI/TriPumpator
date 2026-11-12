@@ -31,11 +31,9 @@ from core.port_scanner import PortInfo, scan_ports
 import json
 from pathlib import Path
 
-# Magazyn ustawień: zwykły plik JSON obok projektu — czytelny,
-# przenośny, usuwa się razem z aplikacją. Konstruktor przyjmuje
-# ścieżkę (testy: plik tymczasowy); domyślnie tripumpator.json
-# w katalogu głównym projektu.
-SETTINGS_PATH = Path(__file__).resolve().parent.parent / "tripumpator.json"
+from core.paths import app_dir
+
+SETTINGS_PATH = app_dir() / "tripumpator.json"
 
 
 class JsonSettings:

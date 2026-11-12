@@ -226,3 +226,4 @@ __marimo__/
 procedures/
 *.proc.json.tmp
 output/
+*.imf

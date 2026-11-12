@@ -20,7 +20,9 @@ from core.proc.steps import (
 )
 
 SCHEMA_VERSION = 1
-PROC_DIR = Path(__file__).resolve().parent.parent.parent / "procedures"
+from core.paths import app_dir
+
+PROC_DIR = app_dir() / "procedures"
 PROC_SUFFIX = ".proc.json"
 
 _KINDS = ("command", "loop_start", "loop_end", "condition")

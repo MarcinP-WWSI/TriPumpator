@@ -7,6 +7,7 @@ dependencies = [
     "auto-py-to-exe==2.50.1",
     "pyqt6==6.11.0",
     "pyserial>=3.5",
+    "pyvium==0.3.0",
 ]
 
 [project.scripts]
