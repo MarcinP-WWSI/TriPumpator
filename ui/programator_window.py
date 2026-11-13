@@ -15,8 +15,9 @@ from pathlib import Path
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget, QFileDialog,
+    QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from core.pump.base import PumpCapabilities, PumpStatus
@@ -41,6 +42,13 @@ def _spin(lo=0.0, hi=99999.0, dec=3, val=1.0) -> QDoubleSpinBox:
     sb.setValue(val)
     return sb
 
+def _pick_imf(edit: QLineEdit) -> None:
+    path, _ = QFileDialog.getOpenFileName(
+        edit, "Wybierz plik pomiaru IviumSoft", str(PROC_DIR),
+        "Pomiary IviumSoft (*.imf);;Wszystkie (*)")
+    if path:
+        edit.setText(path)
+
 
 class _StepDialog(QDialog):
     """Edycja jednego CommandStep (lub pętli). OK = walidacja z caps."""
@@ -63,7 +71,6 @@ class _StepDialog(QDialog):
             lay.addWidget(QLabel("Powtórzenia pętli:"))
             self.count_spin = _spin(1, 999, 0, float(step.count))
             lay.addWidget(self.count_spin)
-            self.extra_box = None
         elif isinstance(step, ConditionStep):
             from core.proc.steps import CONDITIONS, ON_TIMEOUT
             lay.addWidget(QLabel("Warunek:"))
@@ -75,10 +82,14 @@ class _StepDialog(QDialog):
 
             lay.addWidget(QLabel("Pompa:"))
             self.cond_pump_combo = QComboBox()
+            self.cond_pump_combo.addItem("— pomiar (bez pompy) —", None)
             for pid in pids:
                 self.cond_pump_combo.addItem(f"pompa {pid}", pid)
-            i = self.cond_pump_combo.findData(step.pump)
-            self.cond_pump_combo.setCurrentIndex(max(i, 0))
+            if step.pump is None:
+                self.cond_pump_combo.setCurrentIndex(0)
+            else:
+                i = self.cond_pump_combo.findData(step.pump)
+                self.cond_pump_combo.setCurrentIndex(max(i, 0))
             lay.addWidget(self.cond_pump_combo)
 
             # argumenty (widoczne tylko dla warunków, które je mają)
@@ -116,6 +127,24 @@ class _StepDialog(QDialog):
             self._fields: dict[str, QWidget] = {}
             row = 0
             for name in spec.args:
+                if name == "file_path":
+                    grid.addWidget(QLabel("Plik .imf:"), row, 0)
+                    w = QLineEdit(str(step.args.get(name, "")))
+                    browse = QPushButton("…")
+                    browse.setFixedWidth(34)
+                    from PyQt6.QtCore import Qt as _Qt
+                    browse.clicked.connect(
+                        lambda _, le=w: _pick_imf(le))
+                    box = QHBoxLayout()
+                    box.addWidget(w)
+                    box.addWidget(browse)
+                    wrap = QWidget()
+                    wrap.setLayout(box)
+                    self._fields[name] = w
+                    w._browse_btn = browse  # trzymamy referencję
+                    grid.addWidget(wrap, row, 1)
+                    row += 1
+                    continue
                 grid.addWidget(QLabel(f"{name}:"), row, 0)
                 if name in ("unit",) and step.cmd is ProcCmd.SET_RATE:
                     ref_caps = caps[pids[0]] if pids else None
@@ -181,7 +210,7 @@ class _StepDialog(QDialog):
             "próg dozowanej objętości (mL/µL)" if has_args else "")
 
     def _cond_result_step(self, step: ConditionStep) -> ConditionStep:
-        from core.proc.steps import CONDITIONS
+        from core.proc.steps import CONDITIONS, CondCmd
         cond = next(c for c, s in CONDITIONS.items()
                     if s.label == self.cond_combo.currentText())
         pump = self.cond_pump_combo.currentData()
@@ -193,7 +222,6 @@ class _StepDialog(QDialog):
                              timeout_s=self.cond_timeout_spin.value(),
                              on_timeout=self.cond_on_timeout_combo
                              .currentText())
-
     def result_step(self):
         """Nowy krok z pól dialogu (bez walidacji — robi caller)."""
         if self.count_spin is not None:
@@ -205,6 +233,8 @@ class _StepDialog(QDialog):
         for name, w in self._fields.items():
             if isinstance(w, QComboBox):
                 args[name] = w.currentText()
+            elif isinstance(w, QLineEdit):
+                args[name] = w.text().strip()
             else:
                 args[name] = w.value()
         if getattr(self, "_all_box", None) is not None:
@@ -436,10 +466,7 @@ class ProgramatorWindow(QMainWindow):
         self._runner.stop()
 
     def _on_step(self, index: int, total: int, text: str) -> None:
-        if "Czekaj aż" in text:
-            self.status_label.setText(f"krok {index + 1}/{total}: {text}")
-        else:
-            self.status_label.setText(f"krok {index + 1}/{total}: {text}")
+        self.status_label.setText(f"krok {index + 1}/{total}: {text}")
 
     def _on_finished(self) -> None:
         self.status_label.setText("zakończono")
@@ -684,4 +711,29 @@ if __name__ == "__main__":
         assert st.args == {"value": 2.5, "unit": "mL"}
         assert st.timeout_s == 30.0 and st.on_timeout == "continue"
 
+        # 13. MEAS_START i warunki MEAS w GUI: dialog bez exec(), pola
+        #     file_path jako QLineEdit, pompa opcjonalna w warunkach
+        d_meas = _StepDialog(CommandStep(ProcCmd.MEAS_START, None,
+                                         {"file_path": "C:/m.imf"}),
+                             pids, caps_map)
+        assert "file_path" in d_meas._fields
+        assert isinstance(d_meas._fields["file_path"], QLineEdit)
+        d_meas._fields["file_path"].setText("D:/test.imf")
+        st = d_meas.result_step()
+        assert isinstance(st, CommandStep)
+        assert st.args["file_path"] == "D:/test.imf"
+        assert not hasattr(st, "pumps_never")  # needs_pumps=False -> brak combo
+        # MEAS_START nie ma checkboxów pomp:
+        assert d_meas._all_box is None
+
+        d_mcond = _StepDialog(ConditionStep(CondCmd.MEAS_RUNNING, None),
+                              pids, caps_map)
+        assert d_mcond.cond_pump_combo.currentData() is None  # pozycja 0
+        st = d_mcond._cond_result_step(d_mcond._step)
+        assert st.pump is None and st.cond is CondCmd.MEAS_RUNNING
+        # wartości/spin unitów niewidoczne dla MEAS_RUNNING (bez args) — ale
+        # pola istnieją i nie przeszkadzają:
+        d_mcond.cond_timeout_spin.setValue(45.0)
+        st = d_mcond._cond_result_step(d_mcond._step)
+        assert st.timeout_s == 45.0
     print("programator_window: OK")

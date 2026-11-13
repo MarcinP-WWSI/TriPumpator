@@ -41,7 +41,8 @@ class ProcCmd(Enum):
     SET_DIAMETER = auto()
     SET_FORCE = auto()
     CLEAR_DISPENSED = auto()
-    WAIT = auto()            # pauza w procedurze; pumps ignorowane
+    WAIT = auto()
+    MEAS_START = auto()
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,9 @@ PROC_COMMANDS: dict[ProcCmd, CommandSpec] = {
         "dispensed_query"),
     ProcCmd.WAIT: CommandSpec(
         ProcCmd.WAIT, "Czekaj", ("seconds",), None, needs_pumps=False),
+    ProcCmd.MEAS_START: CommandSpec(
+        ProcCmd.MEAS_START, "Start pomiaru (IviumSoft)", ("file_path",),
+        None, needs_pumps=False),
 }
 
 class CondCmd(Enum):
@@ -87,6 +91,8 @@ class CondCmd(Enum):
     RUNNING = auto()       # pompa pracuje
     DISPENSED_GE = auto()  # dozowane >= value (wspólny mianownik: mL)
     ALARM = auto()         # alarm aktywny (np. stall)
+    MEAS_RUNNING = auto()  # pomiar IviumSoft trwa
+    MEAS_FINISHED = auto()  # pomiar IviumSoft zakończony
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,10 @@ CONDITIONS: dict[CondCmd, ConditionSpec] = {
     CondCmd.DISPENSED_GE: ConditionSpec(
         CondCmd.DISPENSED_GE, "dozowane >=", ("value", "unit")),
     CondCmd.ALARM: ConditionSpec(CondCmd.ALARM, "alarm aktywny"),
+    CondCmd.MEAS_RUNNING: ConditionSpec(CondCmd.MEAS_RUNNING,
+                                        "pomiar trwa"),
+    CondCmd.MEAS_FINISHED: ConditionSpec(CondCmd.MEAS_FINISHED,
+                                         "pomiar zakończony"),
 }
 
 ON_TIMEOUT = ("error", "continue")
@@ -110,10 +120,11 @@ ON_TIMEOUT = ("error", "continue")
 @dataclass
 class ConditionStep:
     cond: CondCmd
-    pump: int                      # dokładnie JEDNA pompa (walidowane)
+    pump: int | None = None       # None = warunek globalny (np. pomiar)
     args: dict = field(default_factory=dict)
     timeout_s: float = 60.0
-    on_timeout: str = "error"      # co po przekroczeniu timeoutu
+    on_timeout: str = "error"
+
 
 @dataclass
 class CommandStep:
@@ -147,8 +158,9 @@ def describe(step: Step) -> str:
             body = ""
             if c is CondCmd.DISPENSED_GE:
                 body = f" {a.get('value')} {a.get('unit')}"
-            return (f"Czekaj aż {spec.label}{body} [pompa {p}] "
-                    f"(max {t:g} s)")
+            tail = f"[pompa {p}] " if p is not None else ""
+            return (f"Czekaj aż {spec.label}{body} {tail}"
+                    f"(max {t:g} s)").replace("  ", " ")
         case CommandStep(cmd=cmd, pumps=p, args=a):
             spec = PROC_COMMANDS[cmd]
             body = ""
@@ -166,6 +178,8 @@ def describe(step: Step) -> str:
                 body = f"{a.get('percent')}%"
             elif cmd is ProcCmd.SET_DIRECTION:
                 body = str(a.get("direction"))
+            elif cmd is ProcCmd.MEAS_START:
+                body = str(a.get("file_path", ""))
             parts = [spec.label]
             if body:
                 parts[0] += f": {body}"
@@ -212,10 +226,17 @@ def validate(steps: list[Step],
                 if spec is None:
                     errors.append(f"{pos}: nieznany warunek {cond}")
                     continue
-                if pid not in caps:
+                if pid is not None and pid not in caps:
                     errors.append(f"{pos}: pompa {pid} nie istnieje "
                                   f"w sesji")
                     continue
+                if pid is None and cond not in (CondCmd.MEAS_RUNNING,
+                                                CondCmd.MEAS_FINISHED):
+                    errors.append(f"{pos}: warunek {cond.name} wymaga pompy")
+                    continue
+                if cond is CondCmd.MEAS_RUNNING or \
+                        cond is CondCmd.MEAS_FINISHED:
+                    continue  # bez argumentów, bez pompy — czysto
                 if not MIN_WAIT_S <= ts <= MAX_WAIT_S:
                     errors.append(
                         f"{pos}: timeout poza zakresem "
@@ -241,6 +262,10 @@ def validate(steps: list[Step],
                 spec = PROC_COMMANDS.get(cmd)
                 if spec is None:
                     errors.append(f"{pos}: nieznana komenda {cmd}")
+                    continue
+                if cmd is ProcCmd.MEAS_START:
+                    if not step.args.get("file_path"):
+                        errors.append(f"{pos}: ścieżka pliku .imf wymagana")
                     continue
                 if cmd is ProcCmd.WAIT:
                     secs = step.args.get("seconds")
@@ -313,6 +338,7 @@ def validate(steps: list[Step],
                 elif cmd is ProcCmd.SET_TARGET_TIME:
                     if step.args.get("seconds", 0) <= 0:
                         errors.append(f"{pos}: czas targetu musi być > 0")
+
 
     for _, step in stack:
         errors.append(f"pętla ×{step.count} bez końca")
@@ -468,5 +494,19 @@ if __name__ == "__main__":
     assert validate([ConditionStep(CondCmd.RUNNING, 1),
                      ConditionStep(CondCmd.ALARM, 2)], caps) == []
 
+    # 10. Ivium: komenda MEAS_START + warunki MEAS_*
+    assert describe(ConditionStep(CondCmd.MEAS_FINISHED, None,
+                                  timeout_s=300)) == \
+           "Czekaj aż pomiar zakończony (max 300 s)"
+    assert describe(ConditionStep(CondCmd.MEAS_RUNNING, None)) == \
+           "Czekaj aż pomiar trwa (max 60 s)"
+    assert validate([CommandStep(ProcCmd.MEAS_START, None,
+                                 {"file_path": "C:/m.imf"})], caps) == []
+    assert any("ścieżka" in e for e in validate(
+        [CommandStep(ProcCmd.MEAS_START, None, {})], caps))
+    assert validate([ConditionStep(CondCmd.MEAS_RUNNING, None),
+                     ConditionStep(CondCmd.MEAS_FINISHED, None)], caps) == []
+    assert any("wymaga pompy" in e for e in validate(
+        [ConditionStep(CondCmd.STOPPED, None)], caps))
 
     print("steps: OK")

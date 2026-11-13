@@ -1,23 +1,29 @@
-"""Runner procedur Programatora: wykonuje kroki bez własnego wątku.
+"""Runner procedur Programatora: wykonuje kroki bez własnego wątku
+wyjąwszy start pomiaru IviumSoft (blokuje ~3 s — osobny wątek).
 
-Projekt: runner żyje w GUI-wątku, bo jego "praca" to wyłącznie
-PumpHandle.submit (thread-safe, kolejka workera) i QTimer dla WAIT.
-Ani chwili blokującego I/O — okna aplikacji nie marzną.
+Projekt: runner żyje w GUI-wątku; jego praca to PumpHandle.submit
+(thread-safe) i QTimer. Kroki IviumSoft:
+  MEAS_START   -> ivium.start(path) w wątku jednorazowym (GUI nie marznie)
+  MEAS_RUNNING -> bramka oceniana tyknieniem 0.5 s (ivium nie wypycha
+  MEAS_FINISHED   statusów jak pompy — sami pytamy)
 
-Pętle: wskaźnik + stos liczników (struktura spłaszczona z steps.py):
-  LoopEndStep -> dekrementuj szczyt stosu; >0: skocz za sparowany
-  LoopStartStep; ==0: zdejmij parę i kontynuuj.
+Status kroku (sygnał step_changed) DOTYKANY co 250 ms:
+  WAIT          -> "... — zostało X s"      (odliczanie)
+  bramka pompy   -> "... — timeout: zostało X s"
+  bramka MEAS_*  -> "... — punkty: N | timeout: zostało X s"
 
-Stany: idle -> running -> finished | stopped. run() odrzuca przy
-biegu; stop() ucieka bieżące czekanie i kończy.
+Pętle: wskaźnik + stos liczników. Stany: idle -> running ->
+finished | stopped. Ivium importowany LENIWIE (SIM czytany przy
+imporcie — env musi stać przed pierwszym użyciem w procesie).
 """
 
 from __future__ import annotations
 
+import threading
+import time
+
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from core.pump.base import Op
-from core.pump.worker import PumpHandle
 from core.pump.base import Op, PumpStatus, to_ml
 from core.pump.worker import PumpHandle
 from core.proc.steps import (
@@ -25,9 +31,11 @@ from core.proc.steps import (
     ProcCmd, describe, validate,
 )
 
-# bezpiecznik: procedura z pętlami ma twardy limit wykonanych kroków
-# (nieograniczona pętla nie zawiesi GUI na zawsze)
-MAX_TOTAL_STEPS = 100_000
+MAX_TOTAL_STEPS = 100_000    # bezpiecznik na niekończące się pętle
+MEAS_TICK_MS = 500           # tyk oceny bramek MEAS
+STATUS_TICK_MS = 250         # tyk odliczania/punktów w statusie kroku
+
+MEAS_CONDS = (CondCmd.MEAS_RUNNING, CondCmd.MEAS_FINISHED)
 
 _CMD_TO_OP = {
     ProcCmd.START: (Op.START, {}),
@@ -43,24 +51,43 @@ _CMD_TO_OP = {
 }
 
 
+def _ivium():
+    """Import ivium_measurement (leniwy — SIM czytany przy imporcie)."""
+    from Automation import ivium_measurement
+    return ivium_measurement
+
+
 class ProcedureRunner(QObject):
     step_changed = pyqtSignal(int, int, str)   # (index, total, opis kroku)
     finished = pyqtSignal()
     stopped = pyqtSignal()
     error = pyqtSignal(str)
+    step_changed = pyqtSignal(int, int, str)
+    finished = pyqtSignal()
+    stopped = pyqtSignal()
+    error = pyqtSignal(str)
+    meas_started = pyqtSignal(int, int, str)  # z wątku startu pomiaru
+    meas_failed = pyqtSignal(str)  # z wątku startu pomiaru
 
     def __init__(self, handles: dict[int, PumpHandle], parent=None):
         super().__init__(parent)
-        self._handles = dict(handles)     # pid -> handle (snapshot)
+        self._handles = dict(handles)       # pid -> handle (snapshot)
         self._steps: list = []
-        self._pos = -1                    # indeks bieżącego kroku
-        self._loop_stack: list[list] = []  # [start_idx, pozostalo]
+        self._pos = -1                       # indeks bieżącego kroku
+        self._loop_stack: list[list] = []    # [start_idx, pozostalo]
         self._running = False
-        self._timer: QTimer | None = None
+        # WAIT
+        self._timer: QTimer | None = None          # single-shot: koniec WAIT
+        self._wait_deadline: float | None = None    # monotonic
+        # bramki
         self._cond: tuple[ConditionStep, float] | None = None
-        # (krok, deadline monotonic) — aktywna bramka, jeśli czekamy
-        self._cond_timer: QTimer | None = None
-        # słuchamy statusów WSZYSTKICH pomp (ocena bramki na żywo)
+        self._cond_timer: QTimer | None = None     # single-shot: timeout bramki
+        self._tick_timer: QTimer | None = None     # tyk oceny bramek MEAS
+        self.meas_started.connect(self._on_meas_started)
+        self.meas_failed.connect(self._on_meas_failed)
+        # status kroku (odliczanie / punkty)
+        self._status_timer: QTimer | None = None
+        # słuchamy statusów WSZYSTKICH pomp (ocena bramek na żywo)
         self._relays: list = []
         for pid, h in self._handles.items():
             relay = _CondRelay(pid, self)
@@ -77,8 +104,7 @@ class ProcedureRunner(QObject):
         return self._timer is not None
 
     def run(self, steps: list) -> bool:
-        """Zwaliduj i wykonaj procedurę. False = odrzucono (błąd walidacji
-        albo runner już aktywny) — szczegóły w sygnale error."""
+        """Zwaliduj i wykonaj procedurę. False = odrzucono."""
         if self._running:
             self.error.emit("runner już działa")
             return False
@@ -95,35 +121,33 @@ class ProcedureRunner(QObject):
         return True
 
     def stop(self) -> None:
-        """Przerwij bieg: ucieka WAIT/bramkę, nic nie wysyła do pomp."""
+        """Przerwij bieg: ucieka WAIT/bramkę/status-ticker, nic nie
+        wysyła do pomp ani do IviumSoft."""
         if not self._running:
             return
         self._running = False
         self._leave_condition()
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer.deleteLater()
-            self._timer = None
+        self._stop_wait()
+        self._stop_status_ticker()
         self.stopped.emit()
 
     # ------------------------------------------------------------ silnik
 
     def _advance(self) -> None:
-        """Wykonuj kroki aż do WAIT/konca; wołane natychmiast i z timera."""
+        """Wykonuj kroki aż do WAIT/bramki/konca."""
         if not self._running:
             return
         guard = 0
         while self._running:
             guard += 1
             if guard > MAX_TOTAL_STEPS:
-                self._running = False
-                self.error.emit("przekroczono limit wykonanych kroków "
-                                f"({MAX_TOTAL_STEPS}) — przerywam")
-                self.stopped.emit()
+                self._fail(f"przekroczono limit wykonanych kroków "
+                           f"({MAX_TOTAL_STEPS}) — przerywam")
                 return
             self._pos += 1
             if self._pos >= len(self._steps):
                 self._running = False
+                self._stop_status_ticker()
                 self.finished.emit()
                 return
             step = self._steps[self._pos]
@@ -134,9 +158,7 @@ class ProcedureRunner(QObject):
             if isinstance(step, LoopEndStep):
                 self._emit_progress(step)
                 if not self._loop_stack:
-                    self._running = False     # walidacja powinna złapać,
-                    self.error.emit("pętla bez początku")  # tu fail-safe
-                    self.stopped.emit()
+                    self._fail("pętla bez początku")   # fail-safe
                     return
                 top = self._loop_stack[-1]
                 top[1] -= 1
@@ -148,7 +170,7 @@ class ProcedureRunner(QObject):
             if isinstance(step, ConditionStep):
                 self._emit_progress(step)
                 self._enter_condition(step)
-                return  # _advance z timera/statusu
+                return                          # _advance z timera/statusu
             # CommandStep
             self._emit_progress(step)
             if step.cmd is ProcCmd.WAIT:
@@ -157,6 +179,9 @@ class ProcedureRunner(QObject):
             self._dispatch(step)
 
     def _dispatch(self, step: CommandStep) -> None:
+        if step.cmd is ProcCmd.MEAS_START:
+            self._start_measurement(step)
+            return
         op, arg_names = _CMD_TO_OP[step.cmd]
         kw = {name: step.args[name] for name in arg_names}
         pids = list(self._handles) if step.pumps is None \
@@ -164,38 +189,127 @@ class ProcedureRunner(QObject):
         for pid in pids:
             self._handles[pid].submit(op, **kw)
 
+    def _fail(self, msg: str) -> None:
+        """Koniec z błędem (z dowolnego miejsca, także z wątku)."""
+        self._running = False
+        self._leave_condition()
+        self._stop_wait()
+        self._stop_status_ticker()
+        self.error.emit(msg)
+        self.stopped.emit()
+
+    # ----------------------------------------------------------- WAIT
+
     def _start_wait(self, seconds: float) -> None:
+        self._wait_deadline = time.monotonic() + seconds
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_wait_done)
         self._timer.start(int(seconds * 1000))
+        self._start_status_ticker()
 
-    def _on_wait_done(self) -> None:
+    def _stop_wait(self) -> None:
         if self._timer is not None:
             self._timer.stop()
             self._timer.deleteLater()
             self._timer = None
+        self._wait_deadline = None
+
+    def _on_wait_done(self) -> None:
+        self._stop_wait()
+        self._stop_status_ticker()
         self._advance()
 
-    def _emit_progress(self, step) -> None:
-        self.step_changed.emit(self._pos, len(self._steps), describe(step))
+    # -------------------------------------------------- pomiar IviumSoft
+
+    def _start_measurement(self, step: CommandStep) -> None:
+        """MEAS_START: ivium.start() blokuje do ~3 s — wątek jednorazowy.
+
+        Wątek NIE woła metod runnera wprost (race na polach — patrz
+        meas_started/meas_failed): emituje sygnały, sloty w GUI-wątku
+        robią _fail/step_changed sekwencyjnie z _advance.
+        """
+        path = step.args.get("file_path", "")
+
+        def worker():
+            try:
+                iv = _ivium()
+            except Exception as e:
+                self.meas_failed.emit(
+                    f"brak modułu pomiaru (pyvium/IviumSoft): {e}")
+                return
+            try:
+                iv.start(path)
+                self.meas_started.emit(
+                    self._pos, len(self._steps),
+                    f"{describe(step)} — wystartował")
+            except Exception as e:
+                self.meas_failed.emit(f"pomiar nie wystartował: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="ivium-start").start()
+
+    def _on_meas_started(self, index: int, total: int, text: str) -> None:
+        """Slot w GUI-wątku (sygnał queued z wątku startu)."""
+        self.step_changed.emit(index, total, text)
+
+    def _on_meas_failed(self, msg: str) -> None:
+        """Slot w GUI-wątku — _fail sekwencyjnie z _advance, zero race."""
+        self._fail(msg)
+
+    # ------------------------------------------------------- bramki
 
     def _enter_condition(self, step: ConditionStep) -> None:
-        """Otwórz bramkę: ocena na statusach pompy kroku, timeout na
-        QTimer."""
-        import time as _t
-        self._cond = (step, _t.monotonic() + step.timeout_s)
+        """Otwórz bramkę: timeout zawsze; MEAS_* dodatkowo tyk oceny."""
+        self._cond = (step, time.monotonic() + step.timeout_s)
+
+        # timeout bramki (ZAWSZE — dla pomp i dla MEAS)
         self._cond_timer = QTimer(self)
         self._cond_timer.setSingleShot(True)
         self._cond_timer.timeout.connect(self._on_cond_timeout)
         self._cond_timer.start(int(step.timeout_s * 1000))
 
+        # tyk oceny — tylko MEAS (pompy oceniają się na statusach)
+        if self._tick_timer is not None:
+            self._tick_timer.stop()
+            self._tick_timer.deleteLater()
+            self._tick_timer = None
+        if step.cond in MEAS_CONDS:
+            self._tick_timer = QTimer(self)
+            self._tick_timer.timeout.connect(self._tick)
+            self._tick_timer.start(MEAS_TICK_MS)
+
+        self._start_status_ticker()
+
     def _leave_condition(self) -> None:
+        """Zamknij bramkę — sprzątnij wszystkie trzy timery."""
         self._cond = None
-        if self._cond_timer is not None:
-            self._cond_timer.stop()
-            self._cond_timer.deleteLater()
-            self._cond_timer = None
+        for t in (self._cond_timer, self._tick_timer):
+            if t is not None:
+                t.stop()
+                t.deleteLater()
+        self._cond_timer = None
+        self._tick_timer = None
+        self._stop_status_ticker()
+
+    def _tick(self) -> None:
+        """Tyk oceny bramki MEAS (co 0.5 s)."""
+        if self._cond is None or not self._running:
+            return
+        step, _ = self._cond
+        try:
+            iv = _ivium()
+            if step.cond is CondCmd.MEAS_RUNNING:
+                met = iv.is_running()
+            elif step.cond is CondCmd.MEAS_FINISHED:
+                met = iv.is_finished()
+            else:
+                return
+        except Exception:
+            return          # chwilowy brak łączności — tyknie za 0.5 s
+        if met:
+            self._leave_condition()
+            self._advance()
 
     def _on_pump_status(self, pid: int, st: PumpStatus) -> None:
         """Status pompy pid: jeśli bramka czeka NA TĘ pompę — oceń."""
@@ -234,11 +348,62 @@ class ProcedureRunner(QObject):
         if step.on_timeout == "continue":
             self._advance()  # polityka: jedź dalej
         else:
-            self._running = False
-            self.error.emit(
-                f"warunek '{describe(step)}' niespełniony po "
-                f"{step.timeout_s:g} s")
-            self.stopped.emit()
+            self._fail(f"warunek '{describe(step)}' niespełniony po "
+                       f"{step.timeout_s:g} s")
+
+    # --------------------------------------------- status kroku (ticker)
+
+    def _start_status_ticker(self) -> None:
+        self._stop_status_ticker()
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._on_status_tick)
+        self._status_timer.start(STATUS_TICK_MS)
+
+    def _stop_status_ticker(self) -> None:
+        if self._status_timer is not None:
+            self._status_timer.stop()
+            self._status_timer.deleteLater()
+            self._status_timer = None
+
+    def _on_status_tick(self) -> None:
+        """Odśwież status BIEŻĄCEGO kroku (odliczanie / punkty)."""
+        if not self._running or self._status_timer is None:
+            return
+        if not 0 <= self._pos < len(self._steps):
+            return
+        step = self._steps[self._pos]
+        text = self._status_text(step)
+        if text is not None:
+            self.step_changed.emit(self._pos, len(self._steps), text)
+
+    def _status_text(self, step) -> str | None:
+        base = describe(step)
+        if isinstance(step, CommandStep) and step.cmd is ProcCmd.WAIT:
+            left = self._left_of(self._wait_deadline)
+            return f"{base} — zostało {left:.0f} s"
+        if isinstance(step, ConditionStep):
+            _, deadline = self._cond if self._cond else (None, None)
+            left = self._left_of(deadline)
+            if step.cond in MEAS_CONDS:
+                pts = None
+                try:
+                    pts = _ivium().get_point_count()
+                except Exception:
+                    pass
+                pts_s = f"punkty: {pts}" if pts is not None else "punkty: ?"
+                return f"{base} — {pts_s} | timeout: zostało {left:.0f} s"
+            return f"{base} — timeout: zostało {left:.0f} s"
+        return None
+
+    @staticmethod
+    def _left_of(deadline: float | None) -> float:
+        if deadline is None:
+            return 0.0
+        return max(0.0, deadline - time.monotonic())
+
+    def _emit_progress(self, step) -> None:
+        self.step_changed.emit(self._pos, len(self._steps), describe(step))
+
 
 class _CondRelay(QObject):
     """Przekaźnik statusu jednej pompy do runnera (GUI-wątek)."""
@@ -251,11 +416,11 @@ class _CondRelay(QObject):
     def on_status(self, st: PumpStatus) -> None:
         self._runner._on_pump_status(self._pid, st)
 
+
 # ---------------------------------------------------------------- testy
 if __name__ == "__main__":
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    import time
 
     from PyQt6.QtWidgets import QApplication
 
@@ -292,10 +457,10 @@ if __name__ == "__main__":
         def validate_rate(self, v, u):
             return None
 
-    def wait_for(cond, timeout=5.0):
+    def wait_for(cond, timeout=10.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            app.processEvents()      # dostarcza timeout QTimera
+            app.processEvents()      # dostarcza timeouty QTimerów
             if cond():
                 return True
             time.sleep(0.02)
@@ -310,31 +475,41 @@ if __name__ == "__main__":
     errors: list = []
     stopped: list = []
 
-    # 1. prosta procedura: START -> WAIT 0.2 s -> STOP
+    # 1. prosta procedura: START -> WAIT 1.0 s -> STOP
+    #    (WAIT > 250 ms, by ticker odliczania zdążył strzelić)
     r = ProcedureRunner(handles)
     r.step_changed.connect(lambda i, t, s: seen.append((i, s)))
     r.finished.connect(lambda: finished.append(True))
     r.error.connect(errors.append)
     r.stopped.connect(lambda: stopped.append(True))
 
-    from core.proc.steps import CommandStep, ProcCmd
+    from core.proc.steps import CommandStep, LoopEndStep, LoopStartStep, \
+        ProcCmd
     proc = [
         CommandStep(ProcCmd.START, None),
-        CommandStep(ProcCmd.WAIT, None, {"seconds": 0.2}),
-        CommandStep(ProcCmd.STOP, (1,)),      # stop tylko pompy 1
+        CommandStep(ProcCmd.WAIT, None, {"seconds": 1.0}),
+        CommandStep(ProcCmd.STOP, (1,)),
     ]
     assert r.run(proc)
     assert h1.ops[-1] == (Op.START, {}) and h2.ops[-1] == (Op.START, {})
-    assert r.is_running() and r.is_waiting()  # czeka na WAIT 0.2 s            # czeka na WAIT
+    assert r.is_running() and r.is_waiting()
     assert wait_for(lambda: finished == [True])
-    assert h1.ops[-1] == (Op.STOP, {})        # stop poszedł do obu
-    # STOP (1,) po wait — ostatni op h2 to nadal START:
+    assert h1.ops[-1] == (Op.STOP, {})
     assert h2.ops[-1] == (Op.START, {})
     assert seen[0][1] == "Start pomp [wszystkie]"
-    assert "Czekaj" in seen[1][1]
-    assert [i for i, _ in seen] == [0, 1, 2]
 
-    # 2. pętla ×2: kroki wykonane dwukrotnie, potem finish
+    # 1a. kolejność PIERWSZYCH wykonań kroków (full historia ma też tyki)
+    first_seen = []
+    for i, s in seen:
+        if i not in first_seen:
+            first_seen.append(i)
+    assert first_seen == [0, 1, 2], f"kolejność: {seen}"
+
+    # 1b. odliczanie w statusie WAIT ("zostało X s")
+    waits = [s for i, s in seen if "zostało" in s]
+    assert waits, f"brak odliczania w {seen}"
+
+    # 2. pętla ×2
     h1.ops.clear(); h2.ops.clear(); seen.clear(); finished.clear()
     proc2 = [
         CommandStep(ProcCmd.CLEAR_DISPENSED, None),
@@ -345,23 +520,21 @@ if __name__ == "__main__":
         LoopEndStep(),
         CommandStep(ProcCmd.PURGE, (1,)),
     ]
-    from core.proc.steps import LoopStartStep, LoopEndStep
     assert r.run(proc2)
     assert wait_for(lambda: finished == [True])
     starts = [op for op, _ in h1.ops if op is Op.START]
-    assert len(starts) == 2                    # pętla ×2
+    assert len(starts) == 2
     purges = [op for op, _ in h1.ops if op is Op.PURGE]
-    assert len(purges) == 1                    # po pętli
-    # kolejność: CLD, [START, STOP] ×2, PURGE
+    assert len(purges) == 1
     seq = [op for op, _ in h1.ops if op is not Op.STOP]
     assert seq == [Op.CLEAR_DISPENSED, Op.START, Op.START, Op.PURGE]
 
-    # 3. zagnieżdżone pętle ×2/×2: wewn. 4×, zewn. kroki 2×
+    # 3. zagnieżdżone pętle ×2/×2
     h1.ops.clear(); seen.clear(); finished.clear()
     proc3 = [
-        LoopStartStep(2),  # zewnętrzna
+        LoopStartStep(2),
         CommandStep(ProcCmd.START, (1,)),
-        LoopStartStep(2),  # wewnętrzna
+        LoopStartStep(2),
         CommandStep(ProcCmd.WAIT, None, {"seconds": 0.1}),
         LoopEndStep(),
         CommandStep(ProcCmd.STOP, (1,)),
@@ -372,10 +545,10 @@ if __name__ == "__main__":
     starts = [op for op, _ in h1.ops if op is Op.START]
     stops = [op for op, _ in h1.ops if op is Op.STOP]
     waits = [s for i, s in seen if "Czekaj" in s]
-    assert len(starts) == 2 and len(stops) == 2    # zewnętrzna ×2
-    assert len(waits) == 4                         # wewnętrzna 2×2
+    assert len(starts) == 2 and len(stops) == 2
+    assert len(waits) == 4
 
-    # 4. stop w trakcie WAIT: przerwane, brak finish
+    # 4. stop w trakcie WAIT
     seen.clear(); finished.clear(); stopped.clear()
     r2 = ProcedureRunner(handles)
     r2.finished.connect(lambda: finished.append(True))
@@ -390,11 +563,8 @@ if __name__ == "__main__":
     r2.stop()
     assert stopped == [True] and finished == []
     assert not r2.is_running() and not r2.is_waiting()
-    assert wait_for(lambda: True)                  # pętla zdarzeń: nic nie leci
-    assert finished == []
-    # STOP nie doszedł
 
-    # 5. run po stopie działa; błąd walidacji zgłaszany; pusta -> finish
+    # 5. run po stopie; błąd walidacji; pusta -> finish
     assert r2.run([CommandStep(ProcCmd.START, (1,))])
     assert wait_for(lambda: finished == [True])
     h1.ops.clear()
@@ -403,11 +573,11 @@ if __name__ == "__main__":
         [CommandStep(ProcCmd.SET_RATE, (1,), {"value": 1})])  # brak unit
     assert len(errors) > errs_before
     finished.clear()
-    assert r2.run([])  # pusta: natychmiast finish
+    assert r2.run([])
     assert wait_for(lambda: finished == [True])
 
-    # 6. WAIT na granicy MIN_WAIT_S (0.1 s) przechodzi
-    h1.ops.clear();
+    # 6. WAIT na granicy MIN_WAIT_S (krótki — bez asercji odliczania)
+    h1.ops.clear()
     finished.clear()
     assert r2.run([
         CommandStep(ProcCmd.START, (1,)),
@@ -416,11 +586,9 @@ if __name__ == "__main__":
     ])
     assert wait_for(lambda: finished == [True])
 
-    # 7. bramka STOPPED: czeka na zatrzymanie pompy 1, potem dalej
-    h1.ops.clear();
-    h2.ops.clear()
-    seen.clear();
-    finished.clear()
+    # 7. bramka STOPPED + odliczanie timeoutu w statusie
+    h1.ops.clear(); h2.ops.clear()
+    seen.clear(); finished.clear()
     from core.proc.steps import ConditionStep, CondCmd
 
     r3 = ProcedureRunner(handles)
@@ -434,18 +602,17 @@ if __name__ == "__main__":
     ]
     assert r3.run(proc4)
     assert r3.is_running() and not r3.is_waiting()
-    # pompa 1 pracuje -> bramka czeka; status pracujący nie zwalnia
+    # bramka wisi: najpierw czekamy na tyki odliczania (patrzymy w seen),
+    # dopiero potem zwalniamy bramkę — inaczej ticker nie zdążyłby
     h1._s.status.emit(PumpStatus(running=True))
-    assert r3.is_running()
-    # dopiero zatrzymanie pompy 1 zwalnia bramkę
+    assert wait_for(lambda: any("timeout: zostało" in s for _, s in seen),
+                    timeout=2.0), "brak ticków odliczania timeoutu"
     h1._s.status.emit(PumpStatus(running=False))
     assert wait_for(lambda: finished == [True])
-    assert h2.ops[-1] == (Op.START, {})  # kontynuacja po bramce
+    assert h2.ops[-1] == (Op.START, {})
 
-    # 8. timeout error: bramka nie spełniona -> error+stop
-    errors.clear();
-    finished.clear();
-    stopped.clear()
+    # 8. timeout error
+    errors.clear(); finished.clear(); stopped.clear()
     r4 = ProcedureRunner(handles)
     r4.finished.connect(lambda: finished.append(True))
     r4.stopped.connect(lambda: stopped.append(True))
@@ -455,12 +622,10 @@ if __name__ == "__main__":
     ])
     assert wait_for(lambda: stopped == [True])
     assert any("niespełniony" in e for e in errors)
-    assert finished == []  # nie skończył się normalnie
+    assert finished == []
 
-    # 9. timeout continue: polityka jedzie dalej
-    finished.clear();
-    stopped.clear();
-    errors.clear()
+    # 9. timeout continue
+    finished.clear(); stopped.clear(); errors.clear()
     r5 = ProcedureRunner(handles)
     r5.finished.connect(lambda: finished.append(True))
     r5.error.connect(errors.append)
@@ -472,9 +637,8 @@ if __name__ == "__main__":
     assert wait_for(lambda: finished == [True])
     assert h2.ops[-1] == (Op.STOP, {})
 
-    # 10. DISPENSED_GE: fizyczna wartość zwalnia bramkę
-    h2.ops.clear();
-    finished.clear()
+    # 10. DISPENSED_GE
+    h2.ops.clear(); finished.clear()
     r6 = ProcedureRunner(handles)
     r6.finished.connect(lambda: finished.append(True))
     assert r6.run([
@@ -484,22 +648,79 @@ if __name__ == "__main__":
     ])
     h2._s.status.emit(PumpStatus(running=True, dispensed=0.5,
                                  dispensed_unit="mL"))
-    assert r6.is_running()  # 0.5 < 1.0 — czeka
+    assert r6.is_running()
     h2._s.status.emit(PumpStatus(running=True, dispensed=1500.0,
                                  dispensed_unit="µL"))
-    assert wait_for(lambda: finished == [True])  # 1500 µL = 1.5 mL >= 1
+    assert wait_for(lambda: finished == [True])
 
-    # 11. bramka obcej pompy nie zwalnia (pid mismatch)
-    h1.ops.clear();
-    finished.clear()
+    # 11. bramka obcej pompy nie zwalnia
+    h1.ops.clear(); finished.clear()
     r7 = ProcedureRunner(handles)
     r7.finished.connect(lambda: finished.append(True))
     assert r7.run([
         ConditionStep(CondCmd.STOPPED, 1, timeout_s=30.0),
     ])
-    h2._s.status.emit(PumpStatus(running=False))  # pompa 2 — nie ta
+    h2._s.status.emit(PumpStatus(running=False))     # pompa 2 — nie ta
     assert r7.is_running()
     r7.stop()
     assert not r7.is_running()
+
+    # 12. Ivium: MEAS_START (wątek) + bramki MEAS_* + punkty w statusie
+    #     SIM i timingi PRZED importem (FakePyvium czyta env w __init__)
+    os.environ["SIM"] = "1"
+    os.environ["SIM_STARTUP"] = "0.6"     # bramka RUNNING wisi > 1 tyk
+    os.environ["SIM_PREPHASE"] = "0.4"
+    os.environ["SIM_DURATION"] = "1.2"
+    os.environ["SIM_POINTS"] = "40"
+    os.environ["SIM_FAIL"] = ""
+    from Automation import ivium_measurement as iv
+    import tempfile
+    from pathlib import Path as _P
+    imf = _P(tempfile.gettempdir()) / "runner_test.imf"
+    imf.write_text("fake imf", "utf-8")
+    iv.sim.reset()
+    iv.shutdown(abort=False)              # czysty stan startu testu
+
+    seen.clear(); finished.clear(); stopped.clear(); errors.clear()
+    r8 = ProcedureRunner(handles)
+    r8.step_changed.connect(lambda i, t, s: seen.append((i, s)))
+    r8.finished.connect(lambda: finished.append(True))
+    r8.stopped.connect(lambda: stopped.append(True))
+    r8.error.connect(errors.append)
+    proc_m = [
+        CommandStep(ProcCmd.MEAS_START, None, {"file_path": str(imf)}),
+        ConditionStep(CondCmd.MEAS_RUNNING, None, timeout_s=5.0),
+        ConditionStep(CondCmd.MEAS_FINISHED, None, timeout_s=10.0),
+        CommandStep(ProcCmd.START, (1,)),
+    ]
+    assert r8.run(proc_m)
+    assert wait_for(lambda: finished == [True], timeout=15.0)
+    assert ("start_method", str(imf).replace("\\", "/")) in iv.sim.calls
+    assert h1.ops[-1] == (Op.START, {})
+    pts_states = [s for i, s in seen if "punkty:" in s]
+    assert pts_states, f"brak 'punkty:' w statusach: {seen}"
+    assert any("wystartował" in s for i, s in seen)
+    assert not r8.is_running()
+
+    # 12b. start pomiaru pada -> _fail z wątku; bramka powstrzymuje finish
+    iv.sim.fail_mode = "start"
+    iv.sim.reset()
+    seen.clear(); finished.clear()
+    stopped.clear(); errors.clear()
+    r9 = ProcedureRunner(handles)
+    r9.finished.connect(lambda: finished.append(True))
+    r9.stopped.connect(lambda: stopped.append(True))
+    r9.error.connect(errors.append)
+    assert r9.run([
+        CommandStep(ProcCmd.MEAS_START, None, {"file_path": str(imf)}),
+        ConditionStep(CondCmd.MEAS_RUNNING, None, timeout_s=5.0),
+        CommandStep(ProcCmd.START, (1,)),
+    ])
+    assert wait_for(lambda: stopped == [True], timeout=5.0)
+    assert any("pomiar nie wystartował" in e for e in errors)
+    assert finished == []                 # bramka powstrzymała finish
+    assert not r9.is_running()
+    iv.sim.fail_mode = ""
+    iv.shutdown(abort=False)
 
     print("runner: OK")
