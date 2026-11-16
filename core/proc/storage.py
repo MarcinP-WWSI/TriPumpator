@@ -115,8 +115,11 @@ def _load(item: dict):
         except KeyError as e:
             raise ProcStorageError(
                 f"nieznany warunek {item['cond']!r}") from e
+        pump = item.get("pump")  # None legalny (warunki MEAS)
+        if pump is not None:
+            pump = int(pump)
         return ConditionStep(
-            cond, int(item["pump"]),
+            cond, pump,
             dict(item.get("args") or {}),
             timeout_s=float(item.get("timeout_s", 60.0)),
             on_timeout=item.get("on_timeout", "error"))
@@ -236,5 +239,17 @@ if __name__ == "__main__":
         p8 = td / "empty.proc.json"
         save_procedure([], p8)
         assert load_procedure(p8) == []
+
+        # 9. pump=None round-trip (warunki MEAS) + brak klucza (legacy)
+        st1 = ConditionStep(CondCmd.MEAS_RUNNING, None, timeout_s=30.0)
+        save_procedure([st1], td / "meas.proc.json")
+        back = load_procedure(td / "meas.proc.json")
+        assert back[0].pump is None and back[0].timeout_s == 30.0
+        raw = json.loads((td / "meas.proc.json").read_text("utf-8"))
+        del raw["steps"][0]["pump"]  # legacy: brak klucza
+        (td / "legacy.proc.json").write_text(
+            json.dumps(raw), "utf-8")
+        back2 = load_procedure(td / "legacy.proc.json")
+        assert back2[0].pump is None  # default z dataclassy
 
         print("storage: OK")

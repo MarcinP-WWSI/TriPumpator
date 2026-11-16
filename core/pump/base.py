@@ -97,6 +97,7 @@ class PumpStatus:
     dispensed_unit: str | None = None # "mL" / "µL" — co raportuje pompa
     alarm: str | None = None          # kod alarmu modelu, nie tekst
     raw: str = ""
+    seq: int | None = None  # znacznik emisji workera (testy/FakeHandle: None)
 
 
 @dataclass(frozen=True)

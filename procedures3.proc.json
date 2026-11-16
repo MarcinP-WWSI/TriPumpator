@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "kind": "command",
+      "cmd": "CLEAR_DISPENSED",
+      "pumps": null,
+      "args": {}
+    },
+    {
+      "kind": "command",
+      "cmd": "START",
+      "pumps": [
+        1
+      ],
+      "args": {}
+    },
+    {
+      "kind": "condition",
+      "cond": "STOPPED",
+      "pump": 1,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    },
+    {
+      "kind": "command",
+      "cmd": "WAIT",
+      "pumps": null,
+      "args": {
+        "seconds": 5.0
+      }
+    },
+    {
+      "kind": "command",
+      "cmd": "START",
+      "pumps": [
+        2
+      ],
+      "args": {}
+    }
+  ]
+}

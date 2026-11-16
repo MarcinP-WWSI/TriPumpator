@@ -10,6 +10,7 @@ wątków roboczych).
 from __future__ import annotations
 
 import sys
+import traceback
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
@@ -20,6 +21,11 @@ from ui.selector_window import SelectorWindow
 
 def main() -> None:
     app = QApplication(sys.argv)
+
+    def _excepthook(tp, val, tb):
+        traceback.print_exception(tp, val, tb)
+
+    sys.excepthook = _excepthook
     app.setApplicationName("TriPumpator")
     app.setOrganizationName("WWSI")
     app.setQuitOnLastWindowClosed(False)

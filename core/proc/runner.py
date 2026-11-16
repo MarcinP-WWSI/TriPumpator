@@ -81,6 +81,7 @@ class ProcedureRunner(QObject):
         self._wait_deadline: float | None = None    # monotonic
         # bramki
         self._cond: tuple[ConditionStep, float] | None = None
+        self._cond_seq0 = 0
         self._cond_timer: QTimer | None = None     # single-shot: timeout bramki
         self._tick_timer: QTimer | None = None     # tyk oceny bramek MEAS
         self.meas_started.connect(self._on_meas_started)
@@ -261,8 +262,20 @@ class ProcedureRunner(QObject):
 
     def _enter_condition(self, step: ConditionStep) -> None:
         """Otwórz bramkę: timeout zawsze; MEAS_* dodatkowo tyk oceny."""
-        self._cond = (step, time.monotonic() + step.timeout_s)
 
+        self._cond = (step, time.monotonic() + step.timeout_s)
+        # PRÓG: odpowiedzi na komendy dispatchowane w TEJ SAMEJ serii
+        # _advance (CLEAR/SET_TARGET/START przed bramką) są emitowane
+        # przez worker PO zbrojeniu — stary próg (sam licznik) ich nie
+        # łapał (wykryte na procedures3). seq jest rezerwowany przy
+        # zdejmowaniu z kolejki, więc licznik obejmuje op w locie i
+        # próg = licznik + qsize jest DOKŁADNIE "za serią".
+        self._cond_seq0 = 0
+        if step.pump is not None:
+            h = self._handles.get(step.pump)
+            if h is not None and hasattr(h, "status_seq") \
+                    and hasattr(h, "pending_status"):
+                self._cond_seq0 = h.status_seq() + h.pending_status()
         # timeout bramki (ZAWSZE — dla pomp i dla MEAS)
         self._cond_timer = QTimer(self)
         self._cond_timer.setSingleShot(True)
@@ -312,12 +325,14 @@ class ProcedureRunner(QObject):
             self._advance()
 
     def _on_pump_status(self, pid: int, st: PumpStatus) -> None:
-        """Status pompy pid: jeśli bramka czeka NA TĘ pompę — oceń."""
         if self._cond is None or not self._running:
             return
         step, _ = self._cond
         if step.pump != pid:
             return
+        if st.seq is not None and st.seq <= self._cond_seq0:
+            return
+
         if self._cond_met(step, st):
             self._leave_condition()
             self._advance()
@@ -722,5 +737,55 @@ if __name__ == "__main__":
     assert not r9.is_running()
     iv.sim.fail_mode = ""
     iv.shutdown(abort=False)
+
+    # 13. odpowiedzi na KOMENDY serii zbrojenia (emitowane PO zbrojeniu,
+    #     seq > starego progu!) nie spełniają bramki — wykryte na
+    #     procedures3: STOPED spełniony natychmiast odpowiedzią na
+    #     CLEAR (running=False sprzed startu pompy). Próg =
+    #     seq(zarezerwowane) + qsize = dokładnie za serią.
+    import queue as _queue
+
+
+    class SeqFake(FakeHandle):
+        def __init__(self, caps):
+            super().__init__(caps)
+            self._seq = 0  # licznik rezerwacji workera
+            self._q = _queue.Queue()  # kolejka niedebranych ops
+
+        def status_seq(self):
+            return self._seq
+
+        def pending_status(self):
+            return self._q.qsize()
+
+        def submit(self, op, **kw):
+            self.ops.append((op, kw))
+            self._q.put((op, kw))  # jak worker: kolejka rośnie
+            return True
+
+
+    hs = SeqFake(demo)
+    hs._seq = 3  # historia: 3 polle sprzed procedury
+    fin13: list = []
+    r10 = ProcedureRunner({1: hs})
+    r10.finished.connect(lambda: fin13.append(True))
+    assert r10.run([
+        CommandStep(ProcCmd.START, (1,)),  # seria = 1 komenda
+        ConditionStep(CondCmd.STOPPED, 1, timeout_s=10.0),
+    ])
+    # zbrojenie: próg = 3 (licznik) + 1 (kolejka) = 4
+
+    # odpowiedź na komendę serii (seq 4 == próg) → ODFILTROWANA:
+    stale = PumpStatus(running=False)
+    stale.seq = 4
+    hs._s.status.emit(stale)
+    assert r10.is_running(), "odpowiedź serii spełniła bramkę!"
+
+    # dopiero poll za serią (seq > próg) ma głos: bieg → stop
+    for run_, seq in ((True, 5), (False, 6)):
+        st13 = PumpStatus(running=run_)
+        st13.seq = seq
+        hs._s.status.emit(st13)
+    assert wait_for(lambda: fin13 == [True])
 
     print("runner: OK")

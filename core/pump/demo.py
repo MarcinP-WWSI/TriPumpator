@@ -79,6 +79,7 @@ class DemoDriver(BasePumpDriver):
         now = self._clock()
         dt = now - self._t
         self._t = now
+
         if self.running and dt > 0:
             self._run_seconds += dt
             self.disp[self.direction] += \

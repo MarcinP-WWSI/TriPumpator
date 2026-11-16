@@ -60,6 +60,14 @@ class PumpHandle:
         self._thread.quit()
         self._thread.wait(2000)
 
+    def status_seq(self) -> int:
+        """Aktualny licznik emisji workera (odczyt z GUI-wątku, GIL-atomowy)."""
+        return self._worker._seq
+
+    def pending_status(self) -> int:
+        """Ops w kolejce workera (niedebrane) — do progu bramki."""
+        return self._worker._queue.qsize()
+
 
 class PumpWorker(QObject):
     # statusy i wyniki komend (GUI rysuje z tego)
@@ -81,6 +89,7 @@ class PumpWorker(QObject):
         self._running = True
         self._silent = 0            # licznik kolejnych braków odpowiedzi
         self._link_up = False
+        self._seq = 0
 
 
     # ------------------------------------------------------------- pętla
@@ -130,7 +139,10 @@ class PumpWorker(QObject):
         self.online.emit()
 
     def _dispatch(self, op: Op, kw: dict):
+        self._seq += 1  # REZERWACJA przy zdejmowaniu z kolejki
+        _seq = self._seq  # (licznik obejmuje op w locie)
         try:
+
             if op is Op.POLL:
                 # cisza policzona w _do_poll — tu NIE wolno wołać
                 # _mark_online (zerowałaby licznik histererezy)
@@ -138,6 +150,8 @@ class PumpWorker(QObject):
                     return
             else:
                 st = self.driver.execute(op, **kw)
+
+            st.seq = _seq
             self.status.emit(st)
             self._mark_online()
         except TransportError as e:
