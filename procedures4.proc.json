@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "kind": "command",
+      "cmd": "MEAS_START",
+      "pumps": null,
+      "args": {
+        "file_path": "C:/Users/kompu/PycharmProjects/TriPumpator/test.imf"
+      }
+    },
+    {
+      "kind": "condition",
+      "cond": "MEAS_RUNNING",
+      "pump": null,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    },
+    {
+      "kind": "command",
+      "cmd": "WAIT",
+      "pumps": null,
+      "args": {
+        "seconds": 20.0
+      }
+    },
+    {
+      "kind": "condition",
+      "cond": "MEAS_FINISHED",
+      "pump": null,
+      "args": {},
+      "timeout_s": 60.0,
+      "on_timeout": "error"
+    }
+  ]
+}

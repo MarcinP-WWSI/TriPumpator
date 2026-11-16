@@ -9,6 +9,7 @@ wątków roboczych).
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 
@@ -21,7 +22,8 @@ from ui.selector_window import SelectorWindow
 
 def main() -> None:
     app = QApplication(sys.argv)
-
+    print("ENV:", {k: v for k, v in os.environ.items()
+                   if k.startswith("SIM")})
     def _excepthook(tp, val, tb):
         traceback.print_exception(tp, val, tb)
 

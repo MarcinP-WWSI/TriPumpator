@@ -54,9 +54,10 @@ if SIMULATION:
         """
 
         def __init__(self):
-            self.calls = []          # significant calls, in order
+            self.calls = []
             self.status_polls = 0
             self.point_polls = 0
+            self.reload_timing()
             # timing knobs: SIM_* env vars, or set attributes directly
             self.startup_delay = float(os.environ.get("SIM_STARTUP", "0.3"))
             self.prephase_s = float(os.environ.get("SIM_PREPHASE", "2.0"))
@@ -66,6 +67,17 @@ if SIMULATION:
             self.fail_mode = os.environ.get("SIM_FAIL", "").lower()
             self._t0 = self._t_busy = self._t_end = None
             self._aborted_at = None
+
+        def reload_timing(self):
+            """Timing-i czytane Z ŻYCIA env (nie tylko z importu) —
+            testy/debug zmieniają SIM_* bez restartu procesu."""
+            self.startup_delay = float(os.environ.get("SIM_STARTUP", "0.3"))
+            self.prephase_s = float(os.environ.get("SIM_PREPHASE", "2.0"))
+            self.duration_s = float(os.environ.get("SIM_DURATION", "10.0"))
+            self.total_points = int(os.environ.get("SIM_POINTS", "160"))
+            self.abort_delay_s = float(
+                os.environ.get("SIM_ABORT_DELAY", "0.5"))
+            self.fail_mode = os.environ.get("SIM_FAIL", "").lower()
 
         # -- test helpers --
         def reset(self):
@@ -118,7 +130,13 @@ if SIMULATION:
             if self._running():
                 raise DeviceBusyError("measurement already running (sim)")
             self._aborted_at = None
-            self._t0 = time.time()
+            t0 = time.time()
+            budget = max(3.0, getattr(Pyvium, "startup_delay", 0.0) + 1.0)
+            while time.time() - t0 < budget:
+                if _device_status_code() == 2:
+                    _saw_busy = True
+                    break
+                time.sleep(0.1)
             self._t_busy = self._t0 + self.startup_delay
             self._t_end = self._t_busy + self.prephase_s + self.duration_s
 
