@@ -58,13 +58,6 @@ if SIMULATION:
             self.status_polls = 0
             self.point_polls = 0
             self.reload_timing()
-            # timing knobs: SIM_* env vars, or set attributes directly
-            self.startup_delay = float(os.environ.get("SIM_STARTUP", "0.3"))
-            self.prephase_s = float(os.environ.get("SIM_PREPHASE", "2.0"))
-            self.duration_s = float(os.environ.get("SIM_DURATION", "10.0"))
-            self.total_points = int(os.environ.get("SIM_POINTS", "160"))
-            self.abort_delay_s = float(os.environ.get("SIM_ABORT_DELAY", "0.5"))
-            self.fail_mode = os.environ.get("SIM_FAIL", "").lower()
             self._t0 = self._t_busy = self._t_end = None
             self._aborted_at = None
 
@@ -124,19 +117,16 @@ if SIMULATION:
             self._record("close_driver")
 
         def start_method(self, path=""):
+            # ORYGINALNA logika fake'a — ŻADNEJ pętli budżetu tutaj:
+            # czekanie na busy siedzi w module-level start() (wrapper).
+            # Ta wersja ustawia _t0 natychmiast i nie ma prawa paść.
             self._record("start_method", path)
             if self.fail_mode == "start":
                 raise DeviceNotConnectedToIviumSoftError("SIM_FAIL=start")
             if self._running():
                 raise DeviceBusyError("measurement already running (sim)")
             self._aborted_at = None
-            t0 = time.time()
-            budget = max(3.0, getattr(Pyvium, "startup_delay", 0.0) + 1.0)
-            while time.time() - t0 < budget:
-                if _device_status_code() == 2:
-                    _saw_busy = True
-                    break
-                time.sleep(0.1)
+            self._t0 = time.time()
             self._t_busy = self._t0 + self.startup_delay
             self._t_end = self._t_busy + self.prephase_s + self.duration_s
 
@@ -197,10 +187,15 @@ def start(file_path):
         _open_driver()
         Pyvium.start_method(path.replace("\\", "/"))
 
-        # Wait briefly for busy (status 2) so is_finished()
-        # does not lie during the first second.
+        # Wait for busy (status 2) so is_finished() does not lie during
+        # startup. Budżet SKALOWANY z czasu startu: fake z SIM_STARTUP
+        # > 3 s wchodzi w busy poźniej niż stary budżet — wtedy
+        # _assumed_done fałszował bramki MEAS_RUNNING (procedures3/4).
+        # Realny pyvium nie ma startup_delay -> getattr default 0.0
+        # -> budżet zostaje 3 s jak dotąd.
         t0 = time.time()
-        while time.time() - t0 < 3:
+        budget = max(3.0, getattr(Pyvium, "startup_delay", 0.0) + 1.0)
+        while time.time() - t0 < budget:
             if _device_status_code() == 2:
                 _saw_busy = True
                 break

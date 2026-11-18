@@ -16,6 +16,7 @@ każdego modelu pompy.
 
 from __future__ import annotations
 
+from PyQt6 import QtCore
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout, QMainWindow, QPushButton, QTableWidget,
@@ -26,6 +27,9 @@ from core.pump.base import PumpStatus, fmt_dispensed
 _COLS = ["#", "Model", "Link", "Stan", "Kierunek", "Rate",
          "Dozowane", "Alarm"]
 
+_PANEL_W = 824       # Twoja wypracowana szerokość
+_PANEL_BASE_H = 80   # Twoja baza — nagłówki, przyciski, luka
+_ROW_H = 30          # wysokość wiersza tabeli
 
 class MainPanel(QMainWindow):
     start_all = pyqtSignal()
@@ -41,7 +45,6 @@ class MainPanel(QMainWindow):
 
         central = QWidget()
         root = QVBoxLayout(central)
-
         head = QHBoxLayout()
         self.online_label = QLabel("Online: 0/0")
         self.start_all_btn = QPushButton("▶ START wszystkie")
@@ -92,6 +95,7 @@ class MainPanel(QMainWindow):
             for col in range(3, len(_COLS)):
                 self._set_cell(i, col, "—")
         self._refresh_online()
+        self._retune_size()
 
     def update_pump(self, pump_id: int, st: PumpStatus) -> None:
         """Status pompy -> wiersz. Nieznane id: ignorowane."""
@@ -122,6 +126,7 @@ class MainPanel(QMainWindow):
         self._links.clear()
         self.table.setRowCount(0)
         self._refresh_online()
+        self._retune_size()
 
     # --------------------------------------------------------- pomocnicze
 
@@ -135,6 +140,16 @@ class MainPanel(QMainWindow):
     def closeEvent(self, event) -> None:
         self.end_session.emit()
         event.accept()
+
+    def _retune_size(self) -> None:
+        """Rozmiar panelu = funkcja liczby wierszy (nasza arytmetyka,
+        nie sizeHint Qt — lekcje z device_window wyuczone)."""
+        # bazowa wysokość: nagłówek + tabela (nagłówki) + przyciski + luka
+        base = _PANEL_BASE_H  # np. 180
+        row_h = self.table.verticalHeader() \
+                    .sectionSize(0) or _ROW_H  # 30 z defaultSectionSize
+        h = base + row_h * max(1, len(self._rows))
+        self.resize(_PANEL_W, h)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@
       "cmd": "WAIT",
       "pumps": null,
       "args": {
-        "seconds": 20.0
+        "seconds": 1.0
       }
     },
     {

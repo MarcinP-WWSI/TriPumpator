@@ -15,6 +15,14 @@
         "diameter": 25.0,
         "force": 50.0
       }
+    ],
+    [
+      null,
+      "Pompa demo (symulator)",
+      {
+        "diameter": 25.0,
+        "force": 50.0
+      }
     ]
   ],
   "pump_settings_collapsed": true

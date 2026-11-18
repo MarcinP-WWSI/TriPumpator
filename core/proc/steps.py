@@ -104,12 +104,12 @@ class ConditionSpec:
 
 CONDITIONS: dict[CondCmd, ConditionSpec] = {
     CondCmd.STOPPED: ConditionSpec(CondCmd.STOPPED, "pompa zatrzymana"),
-    CondCmd.RUNNING: ConditionSpec(CondCmd.RUNNING, "pompa pracuje"),
+    CondCmd.RUNNING: ConditionSpec(CondCmd.RUNNING, "pompa włączona"),
     CondCmd.DISPENSED_GE: ConditionSpec(
         CondCmd.DISPENSED_GE, "dozowane >=", ("value", "unit")),
     CondCmd.ALARM: ConditionSpec(CondCmd.ALARM, "alarm aktywny"),
     CondCmd.MEAS_RUNNING: ConditionSpec(CondCmd.MEAS_RUNNING,
-                                        "pomiar trwa"),
+                                        "pomiar rozpoczęty"),
     CondCmd.MEAS_FINISHED: ConditionSpec(CondCmd.MEAS_FINISHED,
                                          "pomiar zakończony"),
 }
@@ -499,7 +499,7 @@ if __name__ == "__main__":
                                   timeout_s=300)) == \
            "Czekaj aż pomiar zakończony (max 300 s)"
     assert describe(ConditionStep(CondCmd.MEAS_RUNNING, None)) == \
-           "Czekaj aż pomiar trwa (max 60 s)"
+           "Czekaj aż pomiar rozpoczęty (max 60 s)"
     assert validate([CommandStep(ProcCmd.MEAS_START, None,
                                  {"file_path": "C:/m.imf"})], caps) == []
     assert any("ścieżka" in e for e in validate(
