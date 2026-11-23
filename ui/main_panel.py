@@ -42,7 +42,8 @@ class MainPanel(QMainWindow):
         self.setWindowTitle("TriPumpator — panel główny")
         self._rows: dict[int, int] = {}          # pump_id -> wiersz
         self._links: dict[int, bool] = {}        # pump_id -> online
-
+        self._applied_size: QtCore.QSize | None = None
+        self._pending_size: tuple[int, int] | None = None
         central = QWidget()
         root = QVBoxLayout(central)
         head = QHBoxLayout()
@@ -96,6 +97,7 @@ class MainPanel(QMainWindow):
                 self._set_cell(i, col, "—")
         self._refresh_online()
         self._retune_size()
+        self._initializedSize = True
 
     def update_pump(self, pump_id: int, st: PumpStatus) -> None:
         """Status pompy -> wiersz. Nieznane id: ignorowane."""
@@ -142,14 +144,29 @@ class MainPanel(QMainWindow):
         event.accept()
 
     def _retune_size(self) -> None:
-        """Rozmiar panelu = funkcja liczby wierszy (nasza arytmetyka,
-        nie sizeHint Qt — lekcje z device_window wyuczone)."""
-        # bazowa wysokość: nagłówek + tabela (nagłówki) + przyciski + luka
-        base = _PANEL_BASE_H  # np. 180
-        row_h = self.table.verticalHeader() \
-                    .sectionSize(0) or _ROW_H  # 30 z defaultSectionSize
-        h = base + row_h * max(1, len(self._rows))
-        self.resize(_PANEL_W, h)
+        """Zapisz ŻĄDANY rozmiar; aplikacja dopiero w showEvent —
+        przed pierwszym show minimumSizeHint jest nieświeże i WM
+        rozciąga okno do realnego minimum layoutu (wykryte printem:
+        resize 'dostaje' 170, a okno po show było większe)."""
+        if self._applied_size is not None \
+                and self.size() != self._applied_size:
+            return                          # ręcznie zmienione — nie deptamy
+        h = _PANEL_BASE_H + _ROW_H * max(1, len(self._rows))
+        self._pending_size = (_PANEL_W, h)
+        if self.isVisible():                # sesja już live (rebuild)?
+            self._apply_size()
+
+    def _apply_size(self) -> None:
+        w, h = self._pending_size
+        self.setMinimumSize(w, h)           # WM nie ma czego przekładać
+        self.resize(w, h)
+        self._applied_size = self.size()    # readback PO resize+show
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._pending_size is not None:
+            self._apply_size()
+            self._pending_size = None
 
 
 if __name__ == "__main__":

@@ -72,40 +72,64 @@ _MARGIN = 32       # marginesy root + ramka okna, całość slacku
 
 
 
-def _fx(w: QWidget, width: int) -> QWidget:
-    """Stała szerokość kontrolki — sizeHint okna staje się czystą
-    funkcją stanu (rozwinięty/zwinięty), niezależną od tekstów,
-    wartości spinów i statusów. To zabija całą klasę 'okna-rośnięcia'."""
-    w.setFixedWidth(width)
-    return w
+from ui.ui_pump_window import Ui_PumpWindow
 
-class PumpWindow(QMainWindow):
+
+class PumpWindow(QWidget):
     closed = pyqtSignal()
 
-    def __init__(self, pump_id: int, handle,
-                 confirm_purge: Callable[[], bool] | None = None,
+    def __init__(self, pump_id, handle, confirm_purge=None,
                  settings=None, parent=None):
         super().__init__(parent)
         self._handle = handle
         self._syncing = False
         self._running = False
         self._confirm_purge = confirm_purge or self._default_confirm_purge
-        self._settings = settings if settings is not None \
-            else JsonSettings()
+        self._settings = settings if settings is not None else JsonSettings()
         caps = handle.capabilities
-
-        # szacunek dozowania: per kierunek, w mL
-        self._est: dict[str, float] = {"INF": 0.0, "WDR": 0.0}
-        self._last_ts: float | None = None
-
-        self.setWindowTitle(f"Pompa {pump_id} — {caps.name}")
+        self._est = {"INF": 0.0, "WDR": 0.0}
+        self._last_ts = None
         self._pump_id = pump_id
+        self._sizes_measured = False
+        # 1. UI w całości z Designera — kod NIE rusza geometrii
+        self.ui = Ui_PumpWindow()
+        self.ui.setupUi(self)
+        self.setWindowTitle(f"Pompa {pump_id} — {caps.name}")
 
-        self._build_ui(caps)
-        self._attach()
+        # 2. aliasy: reszta kodu i testy czytają jak dotąd
+        for name in ("link_label", "model_label", "version_label",
+                     "collapse_btn", "alarm_banner", "settings_box",
+                     "dir_combo", "dir_cur", "rate_spin", "rate_unit",
+                     "set_rate_btn", "rate_cur", "target_mode",
+                     "target_spin", "target_unit", "set_target_btn",
+                     "target_cur", "dia_spin", "set_dia_btn", "dia_cur",
+                     "force_spin", "set_force_btn", "force_cur",
+                     "disp_hdr", "est_hdr", "disp_label", "est_label",
+                     "clear_btn", "start_btn", "stop_btn", "purge_btn",
+                     "error_label"):
+            setattr(self, name, getattr(self.ui, name))
 
-        self._measure_and_store()
+        # 3. widoczność wg capabilities (PRZED pomiarami!)
+        self._apply_caps_visibility(caps)
 
+        # 4. dwa stałe rozmiary — mierzone RAZ, w wiarygodnych
+        #    reżimach (rozszerzony dziewiczy; zwinięty przez hide)
+        self._measure_sizes()
+
+        # 5. connecty — zawsze w kodzie
+        self.collapse_btn.toggled.connect(self._on_collapse)
+        self.dir_combo.currentTextChanged.connect(self._on_direction)
+        self.set_rate_btn.clicked.connect(self._on_set_rate)
+        self.target_mode.currentTextChanged.connect(self._on_target_mode)
+        self.set_target_btn.clicked.connect(self._on_set_target)
+        self.set_dia_btn.clicked.connect(self._on_set_diameter)
+        self.set_force_btn.clicked.connect(self._on_set_force)
+        self.clear_btn.clicked.connect(self._on_clear)
+        self.purge_btn.clicked.connect(self._on_purge)
+        self.start_btn.clicked.connect(lambda: self._submit(Op.START))
+        self.stop_btn.clicked.connect(lambda: self._submit(Op.STOP))
+
+        # 6. restor zwinięcia
         collapsed = bool(self._settings.value(
             "pump_settings_collapsed", False))
         self.collapse_btn.blockSignals(True)
@@ -113,252 +137,19 @@ class PumpWindow(QMainWindow):
         self.collapse_btn.blockSignals(False)
         self._apply_collapse(collapsed)
 
+        self._attach()
 
-    # ---------------------------------------------------------------- UI
-
-    def _build_ui(self, caps: PumpCapabilities) -> None:
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(6)
-
-        head = QHBoxLayout()
-        self.link_label = QLabel("OFFLINE")
-        self.link_label.setStyleSheet("font-weight: bold;")
-        _fx(self.link_label, 64)  # ONLINE/OFFLINE: stałe
-        self.model_label = QLabel(caps.name)
-        self.version_label = QLabel("")
-        _fx(self.version_label, 70)
-        self.collapse_btn = QPushButton("▶")
-        self.collapse_btn.setCheckable(True)
-        self.collapse_btn.setFixedWidth(34)
-        self.collapse_btn.setToolTip(
-            "Zwiń/rozwiń pola ustawiania.\n"
-            "Aktualne wartości, dozowanie i stery zostają widoczne.")
-        self.collapse_btn.toggled.connect(self._on_collapse)
-        head.addWidget(self.link_label)
-        head.addWidget(self.model_label)
-        head.addStretch()
-        head.addWidget(self.version_label)
-        head.addWidget(self.collapse_btn)
-        root.addLayout(head)
-
-        # banner: STAŁA szerokość — zmiana tekstu/alarmu nie rusza hinta
-        self.alarm_banner = QLabel(" ")
-        self.alarm_banner.setStyleSheet(BANNER_IDLE_STYLE)
-        _fx(self.alarm_banner, 240)
-        root.addWidget(self.alarm_banner)
-
-        self.settings_box = QWidget()
-        grid = QGridLayout()
-        self.settings_box.setLayout(grid)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(4)
-        # UWAGA: ŻADNEGO setColumnStretch — z podjętymi szerokościami
-        # stretch tylko dodawałby martwą przestrzeń i niestabilność
-        self._inputs: list[QWidget] = []
-        row = 0
-
-        self.dir_combo: QComboBox | None = None
-        self.dir_cur: QLabel | None = None
-        if len(caps.directions) > 1:
-            grid.addWidget(QLabel("Kierunek:"), row, 0)
-            self.dir_combo = QComboBox()
-            self.dir_combo.addItems(caps.directions)
-            _fx(self.dir_combo, 90)
-            self.dir_combo.currentTextChanged.connect(self._on_direction)
-            self._inputs.append(self.dir_combo)
-            self.dir_cur = QLabel("—")
-            grid.addWidget(self.dir_combo, row, 1)
-            grid.addWidget(self.dir_cur, row, 5)
-            row += 1
-
-        grid.addWidget(QLabel("Rate:"), row, 0)
-        self.rate_spin = QDoubleSpinBox()
-        lo = caps.rate_min
-        hi = caps.rate_max if caps.rate_max != float("inf") else 99999.0
-        self.rate_spin.setRange(lo, hi)
-        self.rate_spin.setDecimals(3)
-        _fx(self.rate_spin, 100)
-        self.rate_unit = QComboBox()
-        self.rate_unit.addItems(caps.rate_units)
-        _fx(self.rate_unit, 90)
-        self.set_rate_btn = QPushButton("Ustaw")
-        _fx(self.set_rate_btn, 84)
-        self.set_rate_btn.clicked.connect(self._on_set_rate)
-        self._inputs += [self.rate_spin, self.rate_unit,
-                         self.set_rate_btn]
-        self.rate_cur = QLabel("—")
-        grid.addWidget(self.rate_spin, row, 1)
-        grid.addWidget(self.rate_unit, row, 2)
-        grid.addWidget(self.set_rate_btn, row, 4)
-        grid.addWidget(self.rate_cur, row, 5)
-        row += 1
-
-        self.target_mode: QComboBox | None = None
-        self.target_spin: QDoubleSpinBox | None = None
-        self.target_unit: QComboBox | None = None
-        self.target_cur: QLabel | None = None
-        if caps.target_volume or caps.target_time:
-            grid.addWidget(QLabel("Target:"), row, 0)
-            self.target_mode = QComboBox()
-            modes = [MODE_CONT]
-            if caps.target_volume:
-                modes.append(MODE_VOL)
-            if caps.target_time:
-                modes.append(MODE_TIME)
-            self.target_mode.addItems(modes)
-            _fx(self.target_mode, 100)
-            self.target_mode.currentTextChanged.connect(
-                self._on_target_mode)
-            self.target_spin = QDoubleSpinBox()
-            self.target_spin.setRange(0.0, 99999.0)
-            self.target_spin.setDecimals(3)
-            _fx(self.target_spin, 100)
-            self.target_unit = QComboBox()
-            _fx(self.target_unit, 90)
-            self.set_target_btn = QPushButton("Ustaw")
-            _fx(self.set_target_btn, 84)
-            self.set_target_btn.clicked.connect(self._on_set_target)
-            self._inputs += [self.target_mode, self.target_spin,
-                             self.target_unit, self.set_target_btn]
-            self.target_cur = QLabel("—")
-            grid.addWidget(self.target_mode, row, 1)
-            grid.addWidget(self.target_spin, row, 2)
-            grid.addWidget(self.target_unit, row, 3)
-            grid.addWidget(self.set_target_btn, row, 4)
-            grid.addWidget(self.target_cur, row, 5)
-            row += 1
-            self._on_target_mode(self.target_mode.currentText())
-
-        self.dia_spin: QDoubleSpinBox | None = None
-        self.dia_cur: QLabel | None = None
-        if caps.diameter_setting:
-            grid.addWidget(QLabel("Średnica [mm]:"), row, 0)
-            self.dia_spin = QDoubleSpinBox()
-            dlo, dhi = caps.diameter_range
-            self.dia_spin.setRange(dlo, dhi)
-            self.dia_spin.setDecimals(2)
-            self.dia_spin.setValue(dhi / 2.0)
-            _fx(self.dia_spin, _W_SPIN)
-            self.set_dia_btn = QPushButton("Ustaw")
-            _fx(self.set_dia_btn, _W_BTN)
-            self.set_dia_btn.clicked.connect(self._on_set_diameter)
-            self._inputs += [self.dia_spin, self.set_dia_btn]
-            self.dia_cur = QLabel("—")
-            grid.addWidget(self.dia_spin, row, 1)
-            grid.addWidget(self.set_dia_btn, row, 4)
-            grid.addWidget(self.dia_cur, row, 5)
-            row += 1
-
-        self.force_spin: QDoubleSpinBox | None = None
-        self.force_cur: QLabel | None = None
-        if caps.force_setting:
-            grid.addWidget(QLabel("Siła [%]:"), row, 0)
-            self.force_spin = QDoubleSpinBox()
-            flo, fhi = caps.force_range
-            self.force_spin.setRange(flo, fhi)
-            self.force_spin.setDecimals(0)
-            self.force_spin.setValue(50)
-            _fx(self.force_spin, _W_SPIN)
-            self.set_force_btn = QPushButton("Ustaw")
-            _fx(self.set_force_btn, _W_BTN)
-            self.set_force_btn.clicked.connect(self._on_set_force)
-            self._inputs += [self.force_spin, self.set_force_btn]
-            self.force_cur = QLabel("—")
-            self.force_cur.setToolTip(FORCE_HINT)
-            grid.addWidget(self.force_spin, row, 1)
-            grid.addWidget(self.set_force_btn, row, 4)
-            grid.addWidget(self.force_cur, row, 5)
-            row += 1
-
-        root.addWidget(self.settings_box)
-
-        # Aktualnie: STAŁE szerokości z wzorców — fluktuacje tekstów
-        # nie mają wpływu na geometrię (było: setMinimumWidth = sufit
-        # nie istniał, dłuższy tekst rozdymał hint)
-        def _fw(lbl: QLabel, pattern: str) -> None:
-            fm = lbl.fontMetrics()
-            text = fm.elidedText(pattern, Qt.TextElideMode.ElideRight,
-                                 fm.horizontalAdvance(pattern))
-            lbl.setFixedWidth(fm.horizontalAdvance(pattern) + 8)
-
-        if self.dir_cur is not None:
-            _fw(self.dir_cur, "WDR")
-        if self.rate_cur is not None:
-            _fw(self.rate_cur, "99999.99 µL/min")
-        if self.target_cur is not None:
-            _fw(self.target_cur, "9999 µL | 99:59:59")
-        if self.dia_cur is not None:
-            _fw(self.dia_cur, "Ø50.00 mm")
-        if self.force_cur is not None:
-            _fw(self.force_cur, "100 %")
-
-        # dozowanie — monitoring, poza zwijanym boksem
-        self.disp_label: QLabel | None = None
-        self.est_label: QLabel | None = None
-        self.disp_hdr: QLabel | None = None
-        self.est_hdr: QLabel | None = None
-        if caps.dispensed_query:
-            disp = QGridLayout()
-            disp.setContentsMargins(0, 0, 0, 0)
-            disp.setHorizontalSpacing(6)
-            disp.addWidget(QLabel("Dozowane:"), 0, 0)
-            self.disp_hdr = QLabel("z pompy")
-            self.est_hdr = QLabel("szacunek")
-            for hdr in (self.disp_hdr, self.est_hdr):
-                hdr.setStyleSheet("color: #666;")
-            disp.addWidget(self.disp_hdr, 0, 1)
-            disp.addWidget(self.est_hdr, 0, 2)
-            self.disp_label = QLabel("—")
-            self.disp_label.setToolTip(
-                "Licznik pompy (autorytatywny; jednostki auto-skalowane)")
-            self.est_label = QLabel("—")
-            self.est_label.setToolTip(
-                "Szacunek lokalny: ustawiony rate × czas.\n"
-                "Nie zna prędkości purge (zaniża); rozjazd z licznikiem\n"
-                "pompy = stall / purge / zgubiona komenda.")
-            self.clear_btn = QPushButton("Zeruj")
-            _fx(self.clear_btn, _W_BTN)
-            self.clear_btn.clicked.connect(self._on_clear)
-            _fx(self.disp_label, 96)
-            _fx(self.est_label, 96)
-            disp.addWidget(self.disp_label, 1, 1)
-            disp.addWidget(self.est_label, 1, 2)
-            disp.addWidget(self.clear_btn, 1, 4)
-            wrap = QWidget()
-            wrap.setLayout(disp)
-            root.addWidget(wrap)
-
-        run = QHBoxLayout()
-        self.start_btn = QPushButton("Start")
-        self.stop_btn = QPushButton("Stop")
-        self.start_btn.clicked.connect(lambda: self._submit(Op.START))
-        self.stop_btn.clicked.connect(lambda: self._submit(Op.STOP))
-        run.addWidget(self.start_btn)
-        run.addWidget(self.stop_btn)
-
-        self.purge_btn: QPushButton | None = None
-        if caps.purge:
-            self.purge_btn = QPushButton("Purge")
-            self.purge_btn.setToolTip("Pełna prędkość! Stop kończy purge.")
-            self.purge_btn.clicked.connect(self._on_purge)
-            run.addWidget(self.purge_btn)
-        run.addStretch()
-        root.addLayout(run)
-
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #e65100;")
-        self.error_label.setWordWrap(True)
-        _fx(self.error_label, 340)
-        fm = self.error_label.fontMetrics()
-        self.error_label.setFixedHeight(fm.height() * 2 + 6)
-        root.addWidget(self.error_label)
-
-        self.setCentralWidget(central)
-
-
+    # def showEvent(self, event) -> None:
+    #     super().showEvent(event)
+    #     if not self._sizes_measured:
+    #         self._sizes_measured = True
+    #         # Teraz okno zna już swoje DPI, style i faktyczne szerokości tekstów
+    #         self._measure_sizes()
+    #         collapsed = self._settings.value(
+    #             "pump_settings_collapsed", False, type=bool
+    #         )
+    #         self.collapse_btn.setChecked(collapsed)
+    #         self._apply_collapse(collapsed)
 
     # ------------------------------------------------------------ sygnały
 
@@ -571,58 +362,48 @@ class PumpWindow(QMainWindow):
 
     # ale kolumna przyjmuje max — stały sufit)
 
-    def _compute_size(self, collapsed: bool) -> tuple[int, int]:
-        """Rozmiar WYŁĄCZNIE z własnych stałych. Szerokość definiuje
-        siatka ustawień w danym stanie (dozowanie/stery są węższe i
-        mają się zmieścić). Expanded: kolumny 0..5 = LABEL+SPIN+UNIT+
-        [UNIT]+BTN+CUR — SPIN/UNIT płacą raz (grid = max per kolumna).
-        Collapsed: LABEL+CUR. Zero hintów Qt (15 rund dowodów)."""
-        fm = self.model_label.fontMetrics()
-        line = fm.height()
-        btn_h = line + 14
+    def _measure_sizes(self) -> None:
+        """Mierzy oba rozmiary okna na podstawie faktycznych wymagań layoutu."""
+        # 1. Expanded = dokładny rozmiar z Designera (540x360)
+        self._size_expanded = (self.width(), self.height())
 
-        has_target = self.target_mode is not None
-        if collapsed:
-            width = _W_LABEL + _GAP + _W_CUR + _MARGIN
-        else:
-            width = (_W_LABEL + _GAP + _W_SPIN + _GAP + _W_UNIT + _GAP
-                     + (_W_UNIT + _GAP if has_target else 0)
-                     + _W_BTN + _GAP + _W_CUR + _MARGIN)
+        # 2. Collapsed = chowamy box i zmuszamy główny layout do przeliczenia minimum
+        self.settings_box.setVisible(False)
+        self.layout().activate()  # wymusza natychmiastowe przeliczenie siatki
 
-        rows = 1 + int(has_target) + int(self.dia_spin is not None) \
-               + int(self.force_spin is not None) \
-               + int(self.dir_combo is not None)
-        row_h = (line + 4) if collapsed else (btn_h + 4)
-        h = 16 + (line + 6) + (line + 14 + 6) + rows * row_h + 6
-        if self.disp_label is not None:
-            h += (line + 2) + (line + 4) + 6
-        h += btn_h + 6 + (line * 2 + 6) + 6 + 6
-        return (width, h)
+        # Pobieramy minimalny rozmiar potrzebny widocznym widżetom
+        min_size = self.layout().minimumSize()
+        self._size_collapsed = (min_size.width(), min_size.height())
 
-    def _measure_and_store(self) -> None:
-        for w in self._inputs:
-            w.setVisible(False)
-        self._size_collapsed = self._compute_size(collapsed=True)
-        for w in self._inputs:
-            w.setVisible(True)
-        self._size_expanded = self._compute_size(collapsed=False)
+        # 3. Przywracamy stan wyjściowy
+        self.settings_box.setVisible(True)
+        self.layout().activate()
+        self.resize(*self._size_expanded)
 
     def _apply_collapse(self, collapsed: bool) -> None:
-        for w in self._inputs:
-            w.setVisible(not collapsed)
-        # "Zeruj" to operacja, nie monitoring — w trybie podglądu
-        # ustępuje miejsca kolumnom dozowania (disp + est)
-        if self.clear_btn is not None:
-            self.clear_btn.setVisible(not collapsed)
-        # est_label ZAWSZE widoczny (cofnięcie chowania — monitoring)
-        if self.est_label is not None:
-            self.est_label.setVisible(True)
+        self.settings_box.setVisible(not collapsed)
         self.collapse_btn.setText("◀" if collapsed else "▶")
-        c = self.centralWidget()
-        c.adjustSize()
-        c.layout().activate()
         self.setFixedSize(*(self._size_collapsed if collapsed
                             else self._size_expanded))
+
+    def _apply_caps_visibility(self, caps) -> None:
+        u = self.ui
+        multi = len(caps.directions) > 1
+        for w in (u.direction_label, u.dir_combo, u.dir_cur):
+            w.setVisible(multi)
+        has_target = caps.target_volume or caps.target_time
+        for w in (u.target_label, u.target_mode, u.target_spin,
+                  u.target_unit, u.set_target_btn, u.target_cur):
+            w.setVisible(has_target)
+        u.diameter_label.setVisible(caps.diameter_setting)
+        u.dia_spin.setVisible(caps.diameter_setting)
+        u.set_dia_btn.setVisible(caps.diameter_setting)
+        u.dia_cur.setVisible(caps.diameter_setting)
+        u.force_label.setVisible(caps.force_setting)
+        u.force_spin.setVisible(caps.force_setting)
+        u.set_force_btn.setVisible(caps.force_setting)
+        u.force_cur.setVisible(caps.force_setting)
+        u.purge_btn.setVisible(caps.purge)
 
 
     # ------------------------------------------------------------ pomocnicze
