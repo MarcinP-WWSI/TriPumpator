@@ -139,27 +139,26 @@ class PumpWindow(QWidget):
     # ---------------------------------------------------- geometria/show
 
     def showEvent(self, event) -> None:
-        """Pierwsze pokazanie = jedyny wiarygodny reżim pomiaru.
-
-        Przed show: minimumSizeHint nieświeże, WM może przepisać
-        rozmiar (MainPanel: resize 'dostaje' 170, okno po show
-        większe). Tu: layout rozłożony, DPI/style znane — mierzymy
-        DWA rozmiary i od tej pory toggl = setFixedSize(zapamiętany).
-        """
         super().showEvent(event)
         if self._size_expanded is not None:
             return                    # już zmierzone (ponowny show)
         self._size_expanded = (self.width(), self.height())
 
-        # collapsed: chowamy box (hide przelicza layout synchronicznie)
         self.settings_box.setVisible(False)
-        self.adjustSize()             # okno dopasowuje się do layoutu
+        self.adjustSize()
         self._size_collapsed = (self.width(), self.height())
-        self.settings_box.setVisible(True)   # stan docelowy niżej
+        self.settings_box.setVisible(True)
 
-        # restor zwinięcia (stan z settings) — teraz już legalnie
+        # sync PRZYCISKU z restorowanym stanem okna: Designer startuje
+        # unchecked; bez tego restor collapsed=True zostawia przycisk
+        # unchecked i PIERWSZY klik toggluje False->True (= zwija
+        # już-zwinięte) zamiast rozwijać. blockSignals: restor nie
+        # odpala _on_collapse (nie pisze do settings).
+        self.collapse_btn.blockSignals(True)
+        self.collapse_btn.setChecked(self._pending_collapse)
+        self.collapse_btn.blockSignals(False)
+
         self._apply_collapse(self._pending_collapse)
-
     def _apply_collapse(self, collapsed: bool) -> None:
         """Zwiń/rozwiń: jeśli rozmiary jeszcze nie zmierzone (okno
         niewidoczne — tylko zapamiętaj stan), w przeciwnym razie
@@ -168,7 +167,7 @@ class PumpWindow(QWidget):
             self._pending_collapse = collapsed
             return
         self.settings_box.setVisible(not collapsed)
-        self.collapse_btn.setText("◀" if collapsed else "▶")
+        self.collapse_btn.setText("▶" if collapsed else "◀")
         self.setFixedSize(*(self._size_collapsed if collapsed
                             else self._size_expanded))
 
@@ -838,5 +837,24 @@ if __name__ == "__main__":
     assert st_q.d == {"pump_settings_collapsed": True}
     assert not w_q.rate_spin.isVisibleTo(w_q)
     assert w_q.rate_cur.isVisibleTo(w_q)
+
+    # 19e. PIERWSZY klik po restorze collapsed=True rozwija od razu
+    #      (regresja: showEvent nie synchronizował przycisku — klik
+    #      togglował False->True = zwijał już-zwinięte)
+    st_r = FakeSt()
+    st_r.d["pump_settings_collapsed"] = True
+    w_r = PumpWindow(18, FakeHandle(DemoDriver.capabilities),
+                     settings=st_r)
+    shown(w_r)
+    assert w_r.collapse_btn.isChecked()  # przycisk = stan okna!
+    assert not w_r.rate_spin.isVisibleTo(w_r)  # zwinięte od startu
+    w_r.collapse_btn.setChecked(False)  # PIERWSZY klik
+    app.processEvents()
+    assert w_r.rate_spin.isVisibleTo(w_r), \
+        "pierwszy klik po restorze collapsed nie rozwija"
+    assert st_r.d == {"pump_settings_collapsed": False}  # zapis usera
+    w_r.collapse_btn.setChecked(True)  # drugi: zwija
+    app.processEvents()
+    assert not w_r.rate_spin.isVisibleTo(w_r)
 
     print("device_window: OK")
