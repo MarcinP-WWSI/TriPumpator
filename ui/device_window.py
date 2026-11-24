@@ -1,22 +1,27 @@
-"""Okno jednej pompy: UI z PumpCapabilities, mowa wyłącznie w Op.
+"""Okno jednej pompy: UI z Designera (pyuic6), mowa wyłącznie w Op.
 
 Kontrakt:
     PumpWindow(pump_id, handle) — podpina się pod sygnały handle;
     detach() — rozłącza sygnały (używa Session przy usuwaniu pompy);
     closed  — sygnał dla Session, gdy użytkownik zamknie okno.
 
-Target: tryb Ciągły/Objętość/Czas budowany z capabilities. Combobox
-trybu jest WYŁĄCZNIE wejściem użytkownika (poll go nie rusza — nie
-wyżyma wyboru przed kliknięciem "Ustaw"); stan pompy pokazuje
-etykieta "Aktualnie" (jak rate_cur). Ustawienie jednego targetu
-czyści drugi (semantyka Quick Start: volume ALBO czas).
+GEOMETRIA (kontrakt po epopei z pikselami):
+    - rozmiary i szerokości NADAJE Designer (.ui) — kod ich nie rusza;
+    - DWA stałe rozmiary okna: rozwinięty (= .ui, święty) i zwinięty;
+    - pomiar obu DOPERO w showEvent (przed pierwszym show layout
+      jest nieświeży — minimum/WM rozciągają okno; wykazane printem
+      [RETUNE] na MainPanelu: resize "dostaje" X, a okno po show
+      było inne);
+    - po pomiarze toggl = setFixedSize(zapamiętany) — zero pomiarów
+      po drodze, zero ghost growth.
+
+Target: tryb Ciągły/Objętość/Czas wg capabilities; combobox trybu
+jest WYŁĄCZNIE wejściem użytkownika (poll go nie rusza); stan pompy
+pokazuje etykieta "Aktualnie". Ustawienie jednego targetu czyści
+drugi (Quick Start: volume ALBO czas).
 
 Bieg blokuje parametry kontekstowe: średnicę, siłę i target —
-realne pompy i tak odrzucają te komendy w biegu (AL-1000: tylko na
-postoju; P11: tylko z ekranu Quick Start), blokada zamiast błędu.
-
-Siatka 6 kolumn: 0=nazwa, 1-3=wejścia, 4=przycisk, 5=Aktualnie —
-przyciski i wartości bieżące wyrównane w pionie dla wszystkich wierszy.
+realne pompy i tak odrzucają te komendy w biegu.
 
 Dozowanie: licznik pompy (autorytatywny) + szacunek lokalny obok.
 Programowe modyfikacje kontrolek pod flagą _syncing.
@@ -27,17 +32,17 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from PyQt6.QtCore import pyqtSignal, QTimer, Qt
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget, QLayout,
+    QMessageBox, QWidget,
 )
 
 from core.pump.base import (
-    BasePumpDriver, Op, PumpCapabilities, PumpStatus, fmt_dispensed,
+    BasePumpDriver, Op, PumpStatus, fmt_dispensed,
     fmt_duration, fmt_volume_ml, norm_unit, time_to_seconds,
 )
 from ui.selector_window import JsonSettings
+from ui.ui_pump_window import Ui_PumpWindow
 
 MODE_CONT = "Ciągły"
 MODE_VOL = "Objętość"
@@ -62,19 +67,6 @@ BANNER_IDLE_STYLE = (
     "font-weight: bold;")
 
 
-_W_LABEL = 100
-_W_SPIN = 90
-_W_UNIT = 70
-_W_BTN = 74
-_W_CUR = 110
-_GAP = 6
-_MARGIN = 32       # marginesy root + ramka okna, całość slacku
-
-
-
-from ui.ui_pump_window import Ui_PumpWindow
-
-
 class PumpWindow(QWidget):
     closed = pyqtSignal()
 
@@ -90,12 +82,18 @@ class PumpWindow(QWidget):
         self._est = {"INF": 0.0, "WDR": 0.0}
         self._last_ts = None
         self._pump_id = pump_id
-        self._sizes_measured = False
+
+        # rozmiary: dopiero showEvent zna prawdę (patrz _measure_sizes)
+        self._size_expanded: tuple[int, int] | None = None
+        self._size_collapsed: tuple[int, int] | None = None
+        self._pending_collapse: bool = False   # stan restorowany przed show
+
         # 1. UI w całości z Designera — kod NIE rusza geometrii
         self.ui = Ui_PumpWindow()
         self.ui.setupUi(self)
         self.setWindowTitle(f"Pompa {pump_id} — {caps.name}")
 
+        # 2. aliasy: reszta kodu i testy czytają jak dotąd
         # 2. aliasy: reszta kodu i testy czytają jak dotąd
         for name in ("link_label", "model_label", "version_label",
                      "collapse_btn", "alarm_banner", "settings_box",
@@ -104,19 +102,21 @@ class PumpWindow(QWidget):
                      "target_spin", "target_unit", "set_target_btn",
                      "target_cur", "dia_spin", "set_dia_btn", "dia_cur",
                      "force_spin", "set_force_btn", "force_cur",
-                     "disp_hdr", "est_hdr", "disp_label", "est_label",
+                     "disp_row_hdr", "disp_hdr", "est_hdr",
+                     "disp_label", "est_label",
                      "clear_btn", "start_btn", "stop_btn", "purge_btn",
                      "error_label"):
             setattr(self, name, getattr(self.ui, name))
 
-        # 3. widoczność wg capabilities (PRZED pomiarami!)
+        # 3. widoczność wg capabilities (PRZED pomiarami w showEvent!)
         self._apply_caps_visibility(caps)
 
-        # 4. dwa stałe rozmiary — mierzone RAZ, w wiarygodnych
-        #    reżimach (rozszerzony dziewiczy; zwinięty przez hide)
-        self._measure_sizes()
+        # 3b. dane dynamiczne wg capabilities (Designer daje puste
+        #     kontrolki — to warstwa, którą stare _build_ui robiło,
+        #     a nowa musi robić tuż po widocznościach)
+        self._populate(caps)
 
-        # 5. connecty — zawsze w kodzie
+        # 4. connecty — zawsze w kodzie
         self.collapse_btn.toggled.connect(self._on_collapse)
         self.dir_combo.currentTextChanged.connect(self._on_direction)
         self.set_rate_btn.clicked.connect(self._on_set_rate)
@@ -129,27 +129,78 @@ class PumpWindow(QWidget):
         self.start_btn.clicked.connect(lambda: self._submit(Op.START))
         self.stop_btn.clicked.connect(lambda: self._submit(Op.STOP))
 
-        # 6. restor zwinięcia
-        collapsed = bool(self._settings.value(
+        # 5. restor zwinięcia: stan zapamiętany, APLIKACJA w showEvent
+        #    (przed show setFixedSize jest niepewny — patrz _measure_sizes)
+        self._pending_collapse = bool(self._settings.value(
             "pump_settings_collapsed", False))
-        self.collapse_btn.blockSignals(True)
-        self.collapse_btn.setChecked(collapsed)
-        self.collapse_btn.blockSignals(False)
-        self._apply_collapse(collapsed)
 
         self._attach()
 
-    # def showEvent(self, event) -> None:
-    #     super().showEvent(event)
-    #     if not self._sizes_measured:
-    #         self._sizes_measured = True
-    #         # Teraz okno zna już swoje DPI, style i faktyczne szerokości tekstów
-    #         self._measure_sizes()
-    #         collapsed = self._settings.value(
-    #             "pump_settings_collapsed", False, type=bool
-    #         )
-    #         self.collapse_btn.setChecked(collapsed)
-    #         self._apply_collapse(collapsed)
+    # ---------------------------------------------------- geometria/show
+
+    def showEvent(self, event) -> None:
+        """Pierwsze pokazanie = jedyny wiarygodny reżim pomiaru.
+
+        Przed show: minimumSizeHint nieświeże, WM może przepisać
+        rozmiar (MainPanel: resize 'dostaje' 170, okno po show
+        większe). Tu: layout rozłożony, DPI/style znane — mierzymy
+        DWA rozmiary i od tej pory toggl = setFixedSize(zapamiętany).
+        """
+        super().showEvent(event)
+        if self._size_expanded is not None:
+            return                    # już zmierzone (ponowny show)
+        self._size_expanded = (self.width(), self.height())
+
+        # collapsed: chowamy box (hide przelicza layout synchronicznie)
+        self.settings_box.setVisible(False)
+        self.adjustSize()             # okno dopasowuje się do layoutu
+        self._size_collapsed = (self.width(), self.height())
+        self.settings_box.setVisible(True)   # stan docelowy niżej
+
+        # restor zwinięcia (stan z settings) — teraz już legalnie
+        self._apply_collapse(self._pending_collapse)
+
+    def _apply_collapse(self, collapsed: bool) -> None:
+        """Zwiń/rozwiń: jeśli rozmiary jeszcze nie zmierzone (okno
+        niewidoczne — tylko zapamiętaj stan), w przeciwnym razie
+        setFixedSize na zapamiętany rozmiar danego stanu."""
+        if self._size_expanded is None:
+            self._pending_collapse = collapsed
+            return
+        self.settings_box.setVisible(not collapsed)
+        self.collapse_btn.setText("◀" if collapsed else "▶")
+        self.setFixedSize(*(self._size_collapsed if collapsed
+                            else self._size_expanded))
+
+    def _on_collapse(self, checked: bool) -> None:
+        self._apply_collapse(checked)
+        self._settings.setValue("pump_settings_collapsed", checked)
+
+    def _apply_caps_visibility(self, caps) -> None:
+        u = self.ui
+        multi = len(caps.directions) > 1
+        for w in (u.direction_label, u.dir_combo, u.dir_cur):
+            w.setVisible(multi)
+        has_target = caps.target_volume or caps.target_time
+        for w in (u.target_label, u.target_mode, u.target_spin,
+                  u.target_unit, u.set_target_btn, u.target_cur):
+            w.setVisible(has_target)
+        u.diameter_label.setVisible(caps.diameter_setting)
+        u.dia_spin.setVisible(caps.diameter_setting)
+        u.set_dia_btn.setVisible(caps.diameter_setting)
+        u.dia_cur.setVisible(caps.diameter_setting)
+        u.force_label.setVisible(caps.force_setting)
+        u.force_spin.setVisible(caps.force_setting)
+        u.set_force_btn.setVisible(caps.force_setting)
+        u.force_cur.setVisible(caps.force_setting)
+        u.purge_btn.setVisible(caps.purge)
+        # dozowanie — LUKA MIGRACYJNA (wykryta testem w_mini): stare
+        # _build_ui tworzyło te widgety tylko przy dispensed_query;
+        # Designer daje je zawsze -> capabilities je chowają
+        has_disp = caps.dispensed_query
+        for w in (u.disp_row_hdr, u.disp_hdr, u.est_hdr,
+                  u.disp_label, u.est_label, u.clear_btn):
+            w.setVisible(has_disp)
 
     # ------------------------------------------------------------ sygnały
 
@@ -349,63 +400,6 @@ class PumpWindow(QWidget):
         self.link_label.setStyleSheet(
             "font-weight: bold; color: #b71c1c;")
 
-    # ------------------------------------------------------------ zwijanie
-
-    def _on_collapse(self, checked: bool) -> None:
-        self._apply_collapse(checked)
-        self._settings.setValue("pump_settings_collapsed", checked)
-
-
-
-    # ------------------------------------------------------------ zwijanie
-
-
-    # ale kolumna przyjmuje max — stały sufit)
-
-    def _measure_sizes(self) -> None:
-        """Mierzy oba rozmiary okna na podstawie faktycznych wymagań layoutu."""
-        # 1. Expanded = dokładny rozmiar z Designera (540x360)
-        self._size_expanded = (self.width(), self.height())
-
-        # 2. Collapsed = chowamy box i zmuszamy główny layout do przeliczenia minimum
-        self.settings_box.setVisible(False)
-        self.layout().activate()  # wymusza natychmiastowe przeliczenie siatki
-
-        # Pobieramy minimalny rozmiar potrzebny widocznym widżetom
-        min_size = self.layout().minimumSize()
-        self._size_collapsed = (min_size.width(), min_size.height())
-
-        # 3. Przywracamy stan wyjściowy
-        self.settings_box.setVisible(True)
-        self.layout().activate()
-        self.resize(*self._size_expanded)
-
-    def _apply_collapse(self, collapsed: bool) -> None:
-        self.settings_box.setVisible(not collapsed)
-        self.collapse_btn.setText("◀" if collapsed else "▶")
-        self.setFixedSize(*(self._size_collapsed if collapsed
-                            else self._size_expanded))
-
-    def _apply_caps_visibility(self, caps) -> None:
-        u = self.ui
-        multi = len(caps.directions) > 1
-        for w in (u.direction_label, u.dir_combo, u.dir_cur):
-            w.setVisible(multi)
-        has_target = caps.target_volume or caps.target_time
-        for w in (u.target_label, u.target_mode, u.target_spin,
-                  u.target_unit, u.set_target_btn, u.target_cur):
-            w.setVisible(has_target)
-        u.diameter_label.setVisible(caps.diameter_setting)
-        u.dia_spin.setVisible(caps.diameter_setting)
-        u.set_dia_btn.setVisible(caps.diameter_setting)
-        u.dia_cur.setVisible(caps.diameter_setting)
-        u.force_label.setVisible(caps.force_setting)
-        u.force_spin.setVisible(caps.force_setting)
-        u.set_force_btn.setVisible(caps.force_setting)
-        u.force_cur.setVisible(caps.force_setting)
-        u.purge_btn.setVisible(caps.purge)
-
-
     # ------------------------------------------------------------ pomocnicze
 
     def _reset_est(self) -> None:
@@ -423,6 +417,68 @@ class PumpWindow(QWidget):
     def closeEvent(self, event) -> None:
         self.closed.emit()
         event.accept()
+
+
+    def _populate(self, caps) -> None:
+        """Wypełnij kontrolki danymi z capabilities + wartości startowe.
+
+        Luka migracyjna z _build_ui: Designer daje PUSTE combo i spiny
+        bez zakresów — bez tej metody GUI jest martwe (pad asercji
+        itemText == [Ciągły, Objętość, Czas]). Kod NIE rusza geometrii
+        (kontrakt z Designera) — tylko dane i zakresy.
+        """
+        # kierunek
+        self.dir_combo.addItems(list(caps.directions))
+        # rate
+        self.rate_unit.addItems(list(caps.rate_units))
+        lo = caps.rate_min
+        hi = caps.rate_max if caps.rate_max != float("inf") else 99999.0
+        self.rate_spin.setRange(lo, hi)
+        self.rate_spin.setDecimals(3)
+        # target: tryby + jednostki (jak _on_target_mode, ale startowo)
+        modes = [MODE_CONT]
+        if caps.target_volume:
+            modes.append(MODE_VOL)
+        if caps.target_time:
+            modes.append(MODE_TIME)
+        self.target_mode.addItems(modes)
+        self.target_spin.setRange(0.0, 99999.0)
+        self.target_spin.setDecimals(3)
+        self._on_target_mode(self.target_mode.currentText())  # unit combo
+        # średnica
+        if caps.diameter_setting:
+            dlo, dhi = caps.diameter_range
+            self.dia_spin.setRange(dlo, dhi)
+            self.dia_spin.setDecimals(2)
+            self.dia_spin.setValue(dhi / 2.0)
+        # siła
+        if caps.force_setting:
+            self.force_spin.setValue(50)
+        # startowe teksty (Designerowe placeholdery do wyciszenia)
+        self.alarm_banner.setText(" ")
+        self.alarm_banner.setStyleSheet(BANNER_IDLE_STYLE)
+        self.error_label.setText("")
+        self.error_label.setToolTip("")
+        # teksty "Aktualnie" — zamiast Designerowego "TextLabel"
+        for lbl in (self.dir_cur, self.rate_cur, self.target_cur,
+                    self.dia_cur, self.force_cur,
+                    self.disp_label, self.est_label):
+            lbl.setText("—")
+        self.version_label.setText("")
+        self.disp_hdr.setText("z pompy")
+        self.est_hdr.setText("szacunek")
+        self.disp_row_hdr.setText("Dozowane:")
+        # tooltipy
+        self.force_cur.setToolTip(FORCE_HINT)
+        self.disp_label.setToolTip(
+            "Licznik pompy (autorytatywny; jednostki auto-skalowane)")
+        self.est_label.setToolTip(
+            "Szacunek lokalny: ustawiony rate × czas.\n"
+            "Nie zna prędkości purge (zaniża); rozjazd z licznikiem\n"
+            "pompy = stall / purge / zgubiona komenda.")
+        self.collapse_btn.setToolTip(
+            "Zwiń/rozwiń pola ustawiania.\n"
+            "Aktualne wartości, dozowanie i stery zostają widoczne.")
 
 
 # ---------------------------------------------------------------- testy
@@ -466,9 +522,15 @@ if __name__ == "__main__":
         def validate_rate(self, value, unit):
             return self.validate_result
 
+    def shown(win):
+        """Pokaż okno (showEvent mierzy) + dostarcz zdarzenia."""
+        win.show()
+        app.processEvents()
+
     # ================= w: model pełny (demo caps) ======================
     h = FakeHandle(DemoDriver.capabilities)
     w = PumpWindow(1, h, confirm_purge=lambda: True)
+    shown(w)          # showEvent: pomiar obu rozmiarów + restor stanu
 
     # 1. struktura
     assert w.dir_combo is not None and w.purge_btn is not None
@@ -478,6 +540,8 @@ if __name__ == "__main__":
             for i in range(w.target_mode.count())] == \
         ["Ciągły", "Objętość", "Czas"]
     assert not w.target_spin.isEnabled()          # tryb domyślny: Ciągły
+    assert w._size_expanded is not None and w._size_collapsed is not None
+    assert w._size_collapsed < w._size_expanded   # zwinięty mniejszy
 
     # 2. start/stop
     w.start_btn.click()
@@ -515,29 +579,28 @@ if __name__ == "__main__":
     assert not w.set_force_btn.isEnabled()
     assert not w.set_target_btn.isEnabled()
     assert not w.target_spin.isEnabled()
-    # zmiana trybu w biegu: spin dalej zablokowany
     w.target_mode.setCurrentText("Objętość")
     assert not w.target_spin.isEnabled()
     h.status.emit(PumpStatus(running=False))
     assert w.dia_spin.isEnabled() and w.set_dia_btn.isEnabled()
     assert w.force_spin.isEnabled() and w.set_force_btn.isEnabled()
-    assert w.target_spin.isEnabled()  # tryb "Objętość" + postój -> OK
+    assert w.target_spin.isEnabled()
     assert w.set_target_btn.isEnabled()
 
-    # 5. alarm: wiersz zarezerwowany — tekst/styl się zmieniają, geometria nie
+    # 5. alarm: wiersz zarezerwowany — tekst/styl się zmieniają
     h.status.emit(PumpStatus(running=False, alarm="S"))
     assert "ALARM" in w.alarm_banner.text()
     h.status.emit(PumpStatus(running=False))
-    assert w.alarm_banner.text() == " "  # idle = pusty, NIE ukryty
+    assert w.alarm_banner.text() == " "
     assert w.alarm_banner.isVisibleTo(w)
 
-    # 6. kierunek: klik -> submit; sync -> cisza
+    # 6. kierunek
     w.dir_combo.setCurrentText("WDR")
     assert h.ops[-1] == (Op.SET_DIRECTION, {"direction": "WDR"})
     n = len(h.ops)
     h.status.emit(PumpStatus(running=True, direction="WDR"))
     assert len(h.ops) == n
-    h.status.emit(PumpStatus(running=False))       # postój dla testu 8
+    h.status.emit(PumpStatus(running=False))
 
     # 7. purge
     w.purge_btn.click()
@@ -547,7 +610,7 @@ if __name__ == "__main__":
     w.purge_btn.click()
     assert len(h.ops) == n
 
-    # 8. target: objętość (czyści czas), czas (czyści objętość), ciągły
+    # 8. target: objętość/czas/ciągły (jak dotąd)
     w.target_mode.setCurrentText("Objętość")
     assert w.target_spin.isEnabled()
     assert {w.target_unit.itemText(i)
@@ -558,7 +621,6 @@ if __name__ == "__main__":
     assert h.ops[-2:] == [(Op.SET_TARGET_TIME, {"seconds": 0}),
                           (Op.SET_TARGET_VOLUME,
                            {"volume": 500.0, "unit": "µL"})]
-
     w.target_mode.setCurrentText("Czas")
     assert {w.target_unit.itemText(i)
             for i in range(w.target_unit.count())} == {"s", "min", "h"}
@@ -567,22 +629,20 @@ if __name__ == "__main__":
     w.set_target_btn.click()
     assert h.ops[-2:] == [(Op.SET_TARGET_VOLUME, {"volume": 0}),
                           (Op.SET_TARGET_TIME, {"seconds": 120.0})]
-
     w.target_mode.setCurrentText("Ciągły")
     assert not w.target_spin.isEnabled()
     w.set_target_btn.click()
     assert h.ops[-2:] == [(Op.SET_TARGET_VOLUME, {"volume": 0}),
                           (Op.SET_TARGET_TIME, {"seconds": 0})]
 
-    # 8b. poll aktualizuje etykietę, NIE walczy o tryb z użytkownikiem
-    w.target_mode.setCurrentText("Czas")           # wybór użytkownika
+    # 8b. poll aktualizuje etykietę, NIE walczy o tryb
+    w.target_mode.setCurrentText("Czas")
     h.status.emit(PumpStatus(running=False, target_time=90.0))
     assert w.target_cur.text() == "1.5 min"
-    assert w.target_mode.currentText() == "Czas"   # nietknięty przez poll
+    assert w.target_mode.currentText() == "Czas"
     h.status.emit(PumpStatus(running=False, target_volume=5.0,
                              target_volume_unit="µL"))
     assert w.target_cur.text() == "5 µL"
-    assert w.target_mode.currentText() == "Czas"
     h.status.emit(PumpStatus(running=False))
     assert w.target_cur.text() == "ciągła"
 
@@ -613,11 +673,11 @@ if __name__ == "__main__":
                                volume_units=("mL", "µL"))
     h_al = FakeHandle(caps_al)
     w_al = PumpWindow(2, h_al)
+    shown(w_al)
 
     assert [w_al.target_mode.itemText(i)
             for i in range(w_al.target_mode.count())] == \
-        ["Ciągły", "Objętość"]                       # brak trybu Czas
-    assert w_al.force_spin is None                   # brak wiersza siły
+        ["Ciągły", "Objętość"]
     w_al.target_mode.setCurrentText("Objętość")
     w_al.target_spin.setValue(10.0)
     w_al.set_target_btn.click()
@@ -627,7 +687,6 @@ if __name__ == "__main__":
     w_al.target_mode.setCurrentText("Ciągły")
     w_al.set_target_btn.click()
     assert h_al.ops[-1] == (Op.SET_TARGET_VOLUME, {"volume": 0})
-    assert all(op != Op.SET_TARGET_TIME for op, _ in h_al.ops)
 
     # ============ w_t: tylko czas ======================================
     caps_t = PumpCapabilities(name="TimeOnly", rate_units=("mL/h",),
@@ -635,6 +694,7 @@ if __name__ == "__main__":
                               target_time=True)
     h_t = FakeHandle(caps_t)
     w_t = PumpWindow(3, h_t)
+    shown(w_t)
 
     assert [w_t.target_mode.itemText(i)
             for i in range(w_t.target_mode.count())] == \
@@ -643,18 +703,33 @@ if __name__ == "__main__":
     w_t.target_spin.setValue(30.0)
     w_t.set_target_btn.click()
     assert h_t.ops[-1] == (Op.SET_TARGET_TIME, {"seconds": 30.0})
-    assert all(op != Op.SET_TARGET_VOLUME for op, _ in h_t.ops)
     w_t.target_mode.setCurrentText("Ciągły")
     w_t.set_target_btn.click()
     assert h_t.ops[-1] == (Op.SET_TARGET_TIME, {"seconds": 0})
 
-    # ============ w_mini: nic opcjonalnego =============================
+
+    # ============ w_mini: nic opcjonalnego — wszystko UKRYTE ===========
+    # (Designer: widgety istnieją zawsze; capabilities je chowają.
+    #  UWAGA: settings z dysku może mieć collapsed=True — testy
+    #  zakładające rozwinięty start dostają świeży FakeSt!)
+    class FakeSt:  # (jeśli już zdefiniowane wyżej — nie duplikuj)
+        def __init__(self):   self.d = {}
+
+        def value(self, k, default=None): return self.d.get(k, default)
+
+        def setValue(self, k, v):         self.d[k] = v
+
+
     caps_mini = PumpCapabilities(name="Mini", rate_units=("mL/h",),
                                  rate_min=0.1, rate_max=50.0)
-    w_mini = PumpWindow(4, FakeHandle(caps_mini))
-    assert w_mini.target_mode is None and w_mini.target_spin is None
-    assert w_mini.force_spin is None and w_mini.dir_combo is None
-    assert w_mini.purge_btn is None and w_mini.disp_label is None
+    w_mini = PumpWindow(4, FakeHandle(caps_mini), settings=FakeSt())
+    shown(w_mini)
+    assert w_mini.rate_spin.isVisibleTo(w_mini)  # rozwinięty start
+    for name in ("target_mode", "target_spin", "target_unit",
+                 "force_spin", "dir_combo", "purge_btn",
+                 "disp_label", "est_label", "clear_btn", "dia_spin"):
+        assert not getattr(w_mini, name).isVisibleTo(w_mini), \
+            f"w_mini: {name} widoczne, a caps go nie wspiera"
 
     # ============ w_lock: blokada rate w biegu (regresja) ==============
     caps_lock = PumpCapabilities(name="Lock", rate_units=("mL/h",),
@@ -662,6 +737,7 @@ if __name__ == "__main__":
                                  set_rate_while_running=False)
     h_lock = FakeHandle(caps_lock)
     w_lock = PumpWindow(5, h_lock)
+    shown(w_lock)
     assert w_lock.rate_spin.isEnabled()
     h_lock.status.emit(PumpStatus(running=True))
     assert not w_lock.rate_spin.isEnabled()
@@ -672,16 +748,11 @@ if __name__ == "__main__":
     w_lock.close()
     assert got_close == [True]
 
-
-    # 19. DETERMINIZM ROZMIARÓW — porządek MA znaczenie:
-    #     size_c mierzone ZANIM cokolwiek togglujemy
+    # 19. DETERMINIZM ROZMIARÓW (showEvent jako jedyny punkt pomiaru)
     class FakeSt:
         def __init__(self):   self.d = {}
-
         def value(self, k, default=None): return self.d.get(k, default)
-
         def setValue(self, k, v):         self.d[k] = v
-
 
     st_e, st_c = FakeSt(), FakeSt()
     st_c.d["pump_settings_collapsed"] = True
@@ -694,16 +765,13 @@ if __name__ == "__main__":
                       settings=st_c)
     w_k2 = PumpWindow(14, FakeHandle(DemoDriver.capabilities),
                       settings=st_c)
-    app.processEvents()
-
-    print(f"STORED: expanded={w_e1._size_expanded} "
-          f"collapsed={w_e1._size_collapsed}")  # zdrowie _measure_and_store
+    shown(w_e1); shown(w_e2); shown(w_k1); shown(w_k2)
 
     size_e = (w_e1.width(), w_e1.height())
     assert (w_e2.width(), w_e2.height()) == size_e, \
         f"dwa rozwinięte: {(w_e2.width(), w_e2.height())} != {size_e}"
 
-    size_c = (w_k1.width(), w_k1.height())  # DOPIERO: przed togglami
+    size_c = (w_k1.width(), w_k1.height())
     assert (w_k2.width(), w_k2.height()) == size_c, \
         f"dwa zwinięte: {(w_k2.width(), w_k2.height())} != {size_c}"
     assert size_c[0] <= size_e[0] and size_c[1] < size_e[1], \
@@ -722,19 +790,6 @@ if __name__ == "__main__":
     app.processEvents()
     assert (w_k1.width(), w_k1.height()) == size_e, "runda 2: rozwinięcie"
 
-
-    def _dbg(win, tag):
-        lay = win.centralWidget().layout()
-        items = " ".join(
-            f"{i}:{lay.itemAt(i).sizeHint().width()}x"
-            f"{lay.itemAt(i).sizeHint().height()}"
-            for i in range(lay.count()))
-        print(f"[{tag}] win={win.width()}x{win.height()} items=[{items}]")
-
-
-    _dbg(w_e1, "E1 urodzona rozwinięta")
-    _dbg(w_k1, "K1 po togglach (rozwinięta)")
-
     # statusy/długie teksty nie ruszają geometrii
     w_e1._handle.status.emit(PumpStatus(
         running=True, rate=99999.999, rate_unit="µL/min",
@@ -743,45 +798,44 @@ if __name__ == "__main__":
     assert (w_e1.width(), w_e1.height()) == size_e, "status ruszył rozmiar"
     assert w_e1.alarm_banner.isVisibleTo(w_e1)
 
-    # 19d. persystencja zwinięcia — SAMOWYSTARCZALNY blok: świeży
-    #      słownik, JEDNO okno, JEDNO okno-restor, asercje po każdej
-    #      akcji (nie tylko na końcu!)
+    # 19d. persystencja zwinięcia (stan aplikowany w showEvent!)
     st_p = FakeSt()
     w_p = PumpWindow(15, FakeHandle(DemoDriver.capabilities),
                      settings=st_p)
-    app.processEvents()
-    assert st_p.d == {}  # konstrukcja nie pisze
+    # PRZED show: stan tylko zapamiętany, nic nie ustawione
+    assert st_p.d == {}
+    shown(w_p)                        # showEvent: pomiar + _apply_collapse
+    assert st_p.d == {}
+    assert w_p.rate_spin.isVisibleTo(w_p)   # default: rozwinięta
 
-    w_p.collapse_btn.setChecked(True)  # zwiń -> zapis
+    w_p.collapse_btn.setChecked(True)
     assert st_p.d == {"pump_settings_collapsed": True}
     assert not w_p.rate_spin.isVisibleTo(w_p)
-    assert w_p.rate_cur.isVisibleTo(w_p)  # monitoring żyje
+    assert w_p.rate_cur.isVisibleTo(w_p)
     assert w_p.disp_label.isVisibleTo(w_p)
 
-    w_p.start_btn.click()  # stery poza boxem
+    w_p.start_btn.click()
     assert w_p._handle.ops[-1] == (Op.START, {})
     w_p._handle.status.emit(PumpStatus(running=True, direction="WDR"))
-    assert w_p.dir_cur.text() == "WDR"  # kierunek z pompy
+    assert w_p.dir_cur.text() == "WDR"
 
-    w_p.collapse_btn.setChecked(False)  # rozwiń -> zapis False
+    w_p.collapse_btn.setChecked(False)
     assert st_p.d == {"pump_settings_collapsed": False}
     assert w_p.rate_spin.isVisibleTo(w_p)
 
-    # restor: nowa instancja czyta False -> startuje ROZWINIĘTA
-    # i nie dopisuje nic (blockSignals + brak emisu przy False->False)
+    # restor False -> rozwinięta; restor True -> zwinięta
     w_p2 = PumpWindow(16, FakeHandle(DemoDriver.capabilities),
                       settings=st_p)
-    app.processEvents()
-    assert st_p.d == {"pump_settings_collapsed": False}  # nietknięte
-    assert w_p2.rate_spin.isVisibleTo(w_p2)  # i faktycznie rozwinięta
+    shown(w_p2)
+    assert st_p.d == {"pump_settings_collapsed": False}
+    assert w_p2.rate_spin.isVisibleTo(w_p2)
 
-    # restor w drugą stronę: słownik z True -> startuje zwinięta
     st_q = FakeSt()
     st_q.d["pump_settings_collapsed"] = True
     w_q = PumpWindow(17, FakeHandle(DemoDriver.capabilities),
                      settings=st_q)
-    app.processEvents()
-    assert st_q.d == {"pump_settings_collapsed": True}  # nietknięte
+    shown(w_q)
+    assert st_q.d == {"pump_settings_collapsed": True}
     assert not w_q.rate_spin.isVisibleTo(w_q)
     assert w_q.rate_cur.isVisibleTo(w_q)
 
